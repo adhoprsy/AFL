@@ -38,43 +38,80 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "llvm/ADT/Statistic.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LegacyPassManager.h"
+
+#if LLVM_VERSION_MAJOR >= 14
+  #include "llvm/Passes/PassPlugin.h"
+  #include "llvm/Passes/PassBuilder.h"
+  #include "llvm/IR/PassManager.h"
+  #include "llvm/Passes/OptimizationLevel.h"
+#else
+  #include "llvm/IR/LegacyPassManager.h"
+#endif
+
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 using namespace llvm;
 
-namespace {
+#if LLVM_VERSION_MAJOR <= 11
+  namespace {
 
   class AFLCoverage : public ModulePass {
 
-    public:
+  public:
+    static char ID;
+    AFLCoverage() : ModulePass(ID) {}
 
-      static char ID;
-      AFLCoverage() : ModulePass(ID) { }
+    bool runOnModule(Module &M) override;
 
-      bool runOnModule(Module &M) override;
-
-      // StringRef getPassName() const override {
-      //  return "American Fuzzy Lop Instrumentation";
-      // }
-
+    // StringRef getPassName() const override {
+    //  return "American Fuzzy Lop Instrumentation";
+    // }
   };
+#else
+class AFLCoverage : public PassInfoMixin<AFLCoverage> {
+public:
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  static bool isRequired() { return true; }
+}; 
 
+PassPluginLibraryInfo getAFLCoveragePluginInfo() {
+  return {LLVM_PLUGIN_API_VERSION, 
+          "AFLPass", 
+          LLVM_VERSION_STRING,
+          [](PassBuilder &PB) {
+            PB.registerOptimizerLastEPCallback(
+                [](ModulePassManager &MPM,
+                   OptimizationLevel Level) {
+                      MPM.addPass(AFLCoverage());
+                  });
+          }};
 }
 
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+  return getAFLCoveragePluginInfo();
+}
 
-char AFLCoverage::ID = 0;
+#endif
 
+#if LLVM_VERSION_MAJOR <= 11
+  } // namespace
+  char AFLCoverage::ID = 0;
+#endif
 
-bool AFLCoverage::runOnModule(Module &M) {
+#if LLVM_VERSION_MAJOR <= 11
+  bool AFLCoverage::runOnModule(Module &M) {
+#else
+
+PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
+
+#endif
 
   LLVMContext &C = M.getContext();
 
-  IntegerType *Int8Ty  = IntegerType::getInt8Ty(C);
+  IntegerType *Int8Ty = IntegerType::getInt8Ty(C);
   IntegerType *Int32Ty = IntegerType::getInt32Ty(C);
 
   /* Show a banner */
@@ -83,13 +120,15 @@ bool AFLCoverage::runOnModule(Module &M) {
 
   if (isatty(2) && !getenv("AFL_QUIET")) {
 
-    SAYF(cCYA "afl-llvm-pass " cBRI VERSION cRST " by <lszekeres@google.com>\n");
+    SAYF(cCYA "afl-llvm-pass " cBRI VERSION cRST
+              " by <lszekeres@google.com>\n");
 
-  } else be_quiet = 1;
+  } else
+    be_quiet = 1;
 
   /* Decide instrumentation ratio */
 
-  char* inst_ratio_str = getenv("AFL_INST_RATIO");
+  char *inst_ratio_str = getenv("AFL_INST_RATIO");
   unsigned int inst_ratio = 100;
 
   if (inst_ratio_str) {
@@ -97,7 +136,6 @@ bool AFLCoverage::runOnModule(Module &M) {
     if (sscanf(inst_ratio_str, "%u", &inst_ratio) != 1 || !inst_ratio ||
         inst_ratio > 100)
       FATAL("Bad value of AFL_INST_RATIO (must be between 1 and 100)");
-
   }
 
   /* Get globals for the SHM region and the previous location. Note that
@@ -108,8 +146,8 @@ bool AFLCoverage::runOnModule(Module &M) {
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
   GlobalVariable *AFLPrevLoc = new GlobalVariable(
-      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc",
-      0, GlobalVariable::GeneralDynamicTLSModel, 0, false);
+      M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc", 0,
+      GlobalVariable::GeneralDynamicTLSModel, 0, false);
 
   /* Instrument all the things! */
 
@@ -121,7 +159,8 @@ bool AFLCoverage::runOnModule(Module &M) {
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
       IRBuilder<> IRB(&(*IP));
 
-      if (AFL_R(100) >= inst_ratio) continue;
+      if (AFL_R(100) >= inst_ratio)
+        continue;
 
       /* Make up cur_loc */
 
@@ -131,20 +170,36 @@ bool AFLCoverage::runOnModule(Module &M) {
 
       /* Load prev_loc */
 
-      LoadInst *PrevLoc = IRB.CreateLoad(AFLPrevLoc);
+      LoadInst *PrevLoc = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+        IRB.getInt32Ty(),
+#endif
+        AFLPrevLoc);
       PrevLoc->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *PrevLocCasted = IRB.CreateZExt(PrevLoc, IRB.getInt32Ty());
 
       /* Load SHM pointer */
 
-      LoadInst *MapPtr = IRB.CreateLoad(AFLMapPtr);
+      LoadInst *MapPtr = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+        PointerType::get(Int8Ty,0),
+#endif       
+        AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *MapPtrIdx =
-          IRB.CreateGEP(MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
+          IRB.CreateGEP(
+ #if LLVM_VERSION_MAJOR >= 14
+          Int8Ty,
+#endif           
+          MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
 
       /* Update bitmap */
 
-      LoadInst *Counter = IRB.CreateLoad(MapPtrIdx);
+      LoadInst *Counter = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+        IRB.getInt8Ty(),
+#endif
+        MapPtrIdx);
       Counter->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *Incr = IRB.CreateAdd(Counter, ConstantInt::get(Int8Ty, 1));
       IRB.CreateStore(Incr, MapPtrIdx)
@@ -157,36 +212,45 @@ bool AFLCoverage::runOnModule(Module &M) {
       Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
       inst_blocks++;
-
     }
 
   /* Say something nice. */
 
   if (!be_quiet) {
 
-    if (!inst_blocks) WARNF("No instrumentation targets found.");
-    else OKF("Instrumented %u locations (%s mode, ratio %u%%).",
-             inst_blocks, getenv("AFL_HARDEN") ? "hardened" :
-             ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN")) ?
-              "ASAN/MSAN" : "non-hardened"), inst_ratio);
-
+    if (!inst_blocks)
+      WARNF("No instrumentation targets found.");
+    else
+      OKF("Instrumented %u locations (%s mode, ratio %u%%).", inst_blocks,
+          getenv("AFL_HARDEN")
+              ? "hardened"
+              : ((getenv("AFL_USE_ASAN") || getenv("AFL_USE_MSAN"))
+                     ? "ASAN/MSAN"
+                     : "non-hardened"),
+          inst_ratio);
   }
 
+#if LLVM_VERSION_MAJOR <= 11
   return true;
+#else
+  return PreservedAnalyses();
+#endif
 
 }
 
-
+#if LLVM_VERSION_MAJOR <= 11
 static void registerAFLPass(const PassManagerBuilder &,
                             legacy::PassManagerBase &PM) {
 
   PM.add(new AFLCoverage());
-
 }
 
+static RegisterStandardPasses
+    RegisterAFLPass(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                    registerAFLPass);
 
-static RegisterStandardPasses RegisterAFLPass(
-    PassManagerBuilder::EP_ModuleOptimizerEarly, registerAFLPass);
+static RegisterStandardPasses
+    RegisterAFLPass0(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                     registerAFLPass);
 
-static RegisterStandardPasses RegisterAFLPass0(
-    PassManagerBuilder::EP_EnabledOnOptLevel0, registerAFLPass);
+#endif

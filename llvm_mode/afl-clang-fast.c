@@ -133,10 +133,15 @@ static void edit_params(u32 argc, char** argv) {
   cc_params[cc_par_cnt++] = "-sanitizer-coverage-block-threshold=0";
 #endif
 #else
+  #if __clang__ && __clang_major__ >= 14
+  cc_params[cc_par_cnt++] = "-fexperimental-new-pass-manager";
+  cc_params[cc_par_cnt++] = "-fpass-plugin=../afl-llvm-pass.so";
+  #else
   cc_params[cc_par_cnt++] = "-Xclang";
   cc_params[cc_par_cnt++] = "-load";
   cc_params[cc_par_cnt++] = "-Xclang";
   cc_params[cc_par_cnt++] = alloc_printf("%s/afl-llvm-pass.so", obj_path);
+  #endif
 #endif /* ^USE_TRACE_PC */
 
   cc_params[cc_par_cnt++] = "-Qunused-arguments";
