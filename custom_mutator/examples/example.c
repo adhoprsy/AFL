@@ -7,7 +7,8 @@
 */
 
 // You need to use -I/path/to/AFLplusplus/include -I.
-#include "afl-fuzz.h"
+#include "../../types.h"
+#include "../../config.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -25,8 +26,6 @@ static const char *commands[] = {
 };
 
 typedef struct my_mutator {
-
-  afl_state_t *afl;
 
   // any additional data here!
   size_t trim_size_current;
@@ -48,7 +47,7 @@ typedef struct my_mutator {
  *         There may be multiple instances of this mutator in one afl-fuzz run!
  *         Return NULL on error.
  */
-my_mutator_t *afl_custom_init(afl_state_t *afl, unsigned int seed) {
+my_mutator_t *afl_custom_init(unsigned int seed) {
 
   srand(seed);  // needed also by surgical_havoc_mutate()
 
@@ -80,8 +79,6 @@ my_mutator_t *afl_custom_init(afl_state_t *afl, unsigned int seed) {
     return NULL;
 
   }
-
-  data->afl = afl;
 
   return data;
 

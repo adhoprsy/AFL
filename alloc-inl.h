@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 #include "config.h"
 #include "types.h"
@@ -573,5 +574,27 @@ static inline void TRK_ck_free(void* ptr, const char* file,
   TRK_ck_free(_p1, __FILE__, __FUNCTION__, __LINE__)
 
 #endif /* ^!DEBUG_BUILD */
+
+/* AFL alloc buffer, the struct is here so we don't need to do fancy ptr
+ * arithmetics */
+struct afl_alloc_buf {
+
+  /* The complete allocated size, including the header of len
+   * AFL_ALLOC_SIZE_OFFSET */
+  size_t complete_size;
+  /* ptr to the first element of the actual buffer */
+  u8 buf[0];
+
+};
+
+#define AFL_ALLOC_SIZE_OFFSET (offsetof(struct afl_alloc_buf, buf))
+
+/* Returns the container element to this ptr */
+static inline struct afl_alloc_buf *afl_alloc_bufptr(void *buf) {
+
+  return (struct afl_alloc_buf *)((u8 *)buf - AFL_ALLOC_SIZE_OFFSET);
+
+}
+
 
 #endif /* ! _HAVE_ALLOC_INL_H */

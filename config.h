@@ -30,6 +30,9 @@
 
 #define VERSION             "2.57b"
 
+#define DEBUG
+
+
 /******************************************************
  *                                                    *
  *  Settings that may be of interest to power users:  *
