@@ -274,6 +274,7 @@ static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_top, /* Top of the list                  */
                           *q_prev100; /* Previous 100 marker              */
 
+static struct queue_entry** queue_buf;
 static struct queue_entry*
   top_rated[MAP_SIZE];                /* Top entries for bitmap bytes     */
 
@@ -290,8 +291,14 @@ static struct extra_data* a_extras;   /* Automatically selected extras    */
 static u32 a_extras_cnt;              /* Total number of tokens available */
 
 static list_t mutator_list;
+static struct custom_mutator *current_custom_fuzz;
 static u32 mutator_count = 0;
 static u8 custom_splice_optout;
+static u8 custom_only;                /* don't proceed havoc/splice*/
+
+static u32 ready_for_splicing_count;
+
+static u8* splicecase_buf;
 
 static u8* (*post_handler)(u8* buf, u32* len);
 
@@ -320,7 +327,8 @@ enum {
   /* 13 */ STAGE_EXTRAS_UI,
   /* 14 */ STAGE_EXTRAS_AO,
   /* 15 */ STAGE_HAVOC,
-  /* 16 */ STAGE_SPLICE
+  /* 16 */ STAGE_SPLICE,
+  STAGE_CUSTOM_MUTATOR
 };
 
 /* Stage value types */
@@ -825,6 +833,15 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   } else q_prev100 = queue = queue_top = q;
 
+  struct queue_entry** queue_buf = (struct queue_entry**) afl_realloc(
+    (void**)&queue_buf, 
+    (queued_paths+1) * sizeof(struct queue_entry*));
+  if (unlikely(!queue_buf)) { PFATAL("alloc"); }
+
+  queue_buf[queued_paths] = q;
+
+  if (likely(q->len > 4)) ++ready_for_splicing_count;
+
   queued_paths++;
   pending_not_fuzzed++;
 
@@ -861,6 +878,30 @@ EXP_ST void destroy_queue(void) {
 
 }
 
+/* Returns the testcase buf from the file behind this queue entry.
+   Increases the refcount. */
+static inline u8* queue_testcase_get(struct queue_entry* q) {
+  
+
+  u32    len = q->len;
+
+  u8 *buf = afl_realloc((void**)&splicecase_buf, len);
+
+  if (unlikely(!buf)) {
+
+    PFATAL("Unable to malloc '%s' with len %u", (char *)q->fname, len);
+
+  }
+
+  int fd = open((char *)q->fname, O_RDONLY);
+
+  if (unlikely(fd < 0)) { PFATAL("Unable to open '%s'", (char *)q->fname); }
+
+  ck_read(fd, buf, len, q->fname);
+  close(fd);
+  return buf;
+
+}
 
 /* Write bitmap to file. The bitmap is useful mostly for the secret
    -B option, to focus a separate fuzzing session on a particular
@@ -5498,6 +5539,8 @@ static u8 fuzz_one(char** argv) {
 
   if (!dumb_mode && !queue_cur->trim_done) {
 
+    u32 old_len = queue_cur->len;
+
     u8 res = trim_case(argv, queue_cur, in_buf);
 
     if (res == FAULT_ERROR)
@@ -5513,6 +5556,8 @@ static u8 fuzz_one(char** argv) {
     queue_cur->trim_done = 1;
 
     if (len != queue_cur->len) len = queue_cur->len;
+
+    if (unlikely(len <= 4 && old_len > 4)) --ready_for_splicing_count;
 
   }
 
@@ -6493,6 +6538,151 @@ skip_extras:
      in the .state/ directory. */
 
   if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
+
+custom_mutator_stage:
+  /*******************
+   * CUSTOM MUTATORS *
+   *******************/
+
+  if (likely(!mutator_count)) { goto havoc_stage; }
+
+  stage_name = "custom mutator";
+  stage_short = "custom";
+  stage_cur = 0;
+  stage_val_type = STAGE_VAL_NONE;
+
+  bool has_custom_fuzz = false;
+  
+  u32  shift = unlikely(custom_only) ? 7 : 8;
+  stage_max = (HAVOC_CYCLES * perf_score / havoc_div) >> shift;
+  if (stage_max < HAVOC_MIN) { stage_max = HAVOC_MIN; }
+
+  const u32 max_seed_size = MAX_FILE, saved_max = stage_max;
+
+  orig_hit_cnt = queued_paths + unique_crashes;
+
+#ifdef INTROSPECTION
+  afl->mutation[0] = 0;
+#endif
+
+  LIST_FOREACH(&mutator_list, struct custom_mutator, {
+
+    if (el->afl_custom_fuzz) {
+
+      havoc_queued = queued_paths;
+
+      current_custom_fuzz = el;
+      stage_name = el->name_short;
+
+      if (el->afl_custom_fuzz_count) {
+
+        stage_max = el->afl_custom_fuzz_count(el->data, out_buf, len);
+
+      } else {
+
+        stage_max = saved_max;
+
+      }
+
+      has_custom_fuzz = true;
+
+      stage_short = el->name_short;
+
+      if (stage_max) {
+
+        for (stage_cur = 0; stage_cur < stage_max; ++stage_cur) {
+
+          struct queue_entry *target = NULL;
+          u32                 tid;
+          u8                 *new_buf = NULL;
+          u32                 target_len = 0;
+
+          /* check if splicing makes sense yet (enough entries) */
+          if (likely(!custom_splice_optout && ready_for_splicing_count > 1)) {
+
+            /* Pick a random other queue entry for passing to external API
+               that has the necessary length */
+
+            do {
+
+              tid = UR(queued_paths);
+
+            } while (unlikely(tid == current_entry /*|| queue_buf[tid]->len < 4*/));
+
+            target = queue_buf[tid];
+            splicing_with = tid;
+
+            /* Read the additional testcase into a new buffer. */
+            new_buf = queue_testcase_get(target);
+            target_len = target->len;
+
+          }
+
+          u8 *mutated_buf = NULL;
+
+          size_t mutated_size =
+              el->afl_custom_fuzz(el->data, out_buf, len, &mutated_buf, new_buf,
+                                  target_len, max_seed_size);
+
+          if (unlikely(!mutated_buf)) {
+
+            // FATAL("Error in custom_fuzz. Size returned: %zu", mutated_size);
+            break;
+
+          }
+
+          if (mutated_size > 0) {
+
+            if (common_fuzz_stuff(argv, mutated_buf, (u32)mutated_size)) {
+
+              goto abandon_entry;
+
+            }
+
+            if (!el->afl_custom_fuzz_count) {
+
+              /* If we're finding new stuff, let's run for a bit longer, limits
+                permitting. */
+
+              if (queued_paths != havoc_queued) {
+
+                if (perf_score <= HAVOC_MAX_MULT * 100) {
+
+                  stage_max *= 2;
+                  perf_score *= 2;
+
+                }
+
+                havoc_queued = queued_paths;
+
+              }
+
+            }
+
+          }
+
+          /* out_buf may have been changed by the call to custom_fuzz */
+          memcpy(out_buf, in_buf, len);
+
+        }
+
+      }
+
+    }
+
+  });
+
+  current_custom_fuzz = NULL;
+
+  if (!has_custom_fuzz) goto havoc_stage;
+
+  new_hit_cnt = queued_paths + unique_crashes;
+
+  stage_finds[STAGE_CUSTOM_MUTATOR] += new_hit_cnt - orig_hit_cnt;
+  stage_cycles[STAGE_CUSTOM_MUTATOR] += stage_cur;
+#ifdef INTROSPECTION
+  queue_cur->stats_mutated += stage_max;
+#endif
 
   /****************
    * RANDOM HAVOC *

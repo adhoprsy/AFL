@@ -37,6 +37,8 @@
 #include "types.h"
 #include "debug.h"
 
+#define INITIAL_GROWTH_SIZE (64)
+
 /* User-facing macro to sprintf() to a dynamically allocated buffer. */
 
 #define alloc_printf(_str...) ({ \
@@ -593,6 +595,92 @@ struct afl_alloc_buf {
 static inline struct afl_alloc_buf *afl_alloc_bufptr(void *buf) {
 
   return (struct afl_alloc_buf *)((u8 *)buf - AFL_ALLOC_SIZE_OFFSET);
+
+}
+
+/* This function calculates the next power of 2 greater or equal its argument.
+ @return The rounded up power of 2 (if no overflow) or 0 on overflow.
+*/
+static inline size_t next_pow2(size_t in) {
+
+  // Commented this out as this behavior doesn't change, according to unittests
+  // if (in == 0 || in > (size_t)-1) {
+
+  //
+  //   return 0;                  /* avoid undefined behaviour under-/overflow
+  //   */
+  //
+  // }
+
+  size_t out = in - 1;
+  out |= out >> 1;
+  out |= out >> 2;
+  out |= out >> 4;
+  out |= out >> 8;
+  out |= out >> 16;
+  return out + 1;
+
+}
+
+/* This function makes sure *size is > size_needed after call.
+ It will realloc *buf otherwise.
+ *size will grow exponentially as per:
+ https://blog.mozilla.org/nnethercote/2014/11/04/please-grow-your-buffers-exponentially/
+ Will return NULL and free *buf if size_needed is <1 or realloc failed.
+ @return For convenience, this function returns *buf.
+ */
+static inline void *afl_realloc(void **buf, size_t size_needed) {
+
+  struct afl_alloc_buf *new_buf = NULL;
+
+  size_t current_size = 0;
+  size_t next_size = 0;
+
+  if (likely(*buf)) {
+
+    /* the size is always stored at buf - 1*size_t */
+    new_buf = (struct afl_alloc_buf *)afl_alloc_bufptr(*buf);
+    current_size = new_buf->complete_size;
+
+  }
+
+  size_needed += AFL_ALLOC_SIZE_OFFSET;
+
+  /* No need to realloc */
+  if (likely(current_size >= size_needed)) { return *buf; }
+
+  /* No initial size was set */
+  if (size_needed < INITIAL_GROWTH_SIZE) {
+
+    next_size = INITIAL_GROWTH_SIZE;
+
+  } else {
+
+    /* grow exponentially */
+    next_size = next_pow2(size_needed);
+
+    /* handle overflow: fall back to the original size_needed */
+    if (unlikely(!next_size)) { next_size = size_needed; }
+
+  }
+
+  /* alloc */
+  struct afl_alloc_buf *newer_buf =
+      (struct afl_alloc_buf *)realloc(new_buf, next_size);
+  if (unlikely(!newer_buf)) {
+
+    free(new_buf);  // avoid a leak
+    *buf = NULL;
+    return NULL;
+
+  }
+
+  new_buf = newer_buf;
+  memset(((u8 *)new_buf) + current_size, 0, next_size - current_size);
+
+  new_buf->complete_size = next_size;
+  *buf = (void *)(new_buf->buf);
+  return *buf;
 
 }
 
