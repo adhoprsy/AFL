@@ -7781,6 +7781,8 @@ int main(int argc, char** argv) {
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0, seek_to;
   u8  *extras_dir = 0;
+  // symblic analysis extracted dictionary
+  u8  *sym_dict_dir = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
@@ -7795,7 +7797,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QV")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:X:QV")) > 0)
 
     switch (opt) {
 
@@ -7854,6 +7856,12 @@ int main(int argc, char** argv) {
         if (extras_dir) FATAL("Multiple -x options not supported");
         extras_dir = optarg;
         break;
+      
+      case 'X': {/* symbolic dictionary */
+        if (sym_dict_dir) FATAL("Multiple -X options (sym extracted dictionary) not supported");
+        sym_dict_dir = optarg;
+        break;
+      }
 
       case 't': { /* timeout */
 
