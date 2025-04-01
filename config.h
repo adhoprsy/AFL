@@ -359,4 +359,16 @@
 
 // #define IGNORE_FINDS
 
+/* SkipDet's global configuration */
+ 
+ #define MINIMAL_BLOCK_SIZE 64
+ #define SMALL_DET_TIME (60 * 1000 * 1000U)
+ #define MAXIMUM_INF_EXECS (16 * 1024U)
+ #define MAXIMUM_QUICK_EFF_EXECS (64 * 1024U)
+ #define THRESHOLD_DEC_TIME (20 * 60 * 1000U)
+ 
+ /* Set the Prob of selecting eff_bytes 3 times more than original,
+    Now disabled */
+ #define EFF_HAVOC_RATE 3
+
 #endif /* ! _HAVE_CONFIG_H */
