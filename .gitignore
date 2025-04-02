@@ -24,3 +24,6 @@ afl-llvm-rt.o
 .cache
 **/.cache
 test
+.clang-format
+.zed/
+compile_commands.json
