@@ -39,6 +39,11 @@
 #include <unistd.h>
 
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Value.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Constant.h"
 
 #if LLVM_VERSION_MAJOR >= 14
   #include "llvm/Passes/PassPlugin.h"
@@ -75,11 +80,11 @@ class AFLCoverage : public PassInfoMixin<AFLCoverage> {
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
   static bool isRequired() { return true; }
-}; 
+};
 
 PassPluginLibraryInfo getAFLCoveragePluginInfo() {
-  return {LLVM_PLUGIN_API_VERSION, 
-          "AFLPass", 
+  return {LLVM_PLUGIN_API_VERSION,
+          "AFLPass",
           LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
             PB.registerOptimizerLastEPCallback(
@@ -100,6 +105,16 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
   } // namespace
   char AFLCoverage::ID = 0;
 #endif
+
+uint64_t read_id_from_metadata(MDNode* MD) {
+  if (MD && MD->getNumOperands() >= 1) {
+    if (ConstantInt *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))) {
+      uint64_t id = CI->getZExtValue();
+      return id;
+    }
+  }
+  return 0;
+}
 
 #if LLVM_VERSION_MAJOR <= 11
   bool AFLCoverage::runOnModule(Module &M) {
@@ -159,12 +174,18 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       BasicBlock::iterator IP = BB.getFirstInsertionPt();
       IRBuilder<> IRB(&(*IP));
 
-      if (AFL_R(100) >= inst_ratio)
-        continue;
+      // if (AFL_R(100) >= inst_ratio)
+      //   continue;
 
       /* Make up cur_loc */
+      Instruction* term = BB.getTerminator();
+      if (!term) continue;
+      errs() << *term << "\n";
+      if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) continue;
+      uint64_t cur_loc =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
 
-      unsigned int cur_loc = AFL_R(MAP_SIZE);
+      errs() <<*term <<  " | cur_loc : " << cur_loc << "\n";
+      // unsigned int cur_loc = AFL_R(MAP_SIZE);
 
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
 
@@ -183,14 +204,14 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       LoadInst *MapPtr = IRB.CreateLoad(
 #if LLVM_VERSION_MAJOR >= 14
         PointerType::get(Int8Ty,0),
-#endif       
+#endif
         AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *MapPtrIdx =
           IRB.CreateGEP(
  #if LLVM_VERSION_MAJOR >= 14
           Int8Ty,
-#endif           
+#endif
           MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
 
       /* Update bitmap */
