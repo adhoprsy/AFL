@@ -238,6 +238,18 @@ static s32 cpu_aff = -1;       	      /* Selected CPU core                */
 
 static FILE* plot_file;               /* Gnuplot output file              */
 
+struct symdict_data {
+  u32 begin;
+  u32 end;
+  u8 len;
+  u8* str;
+};
+u32 cur_symdict_len;
+struct symdict_data* cur_symdict;
+u8* symdict_dir;
+// struct symdict_reader_entry *symdict_list;
+// u32 total_symdict;
+
 struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */
@@ -265,6 +277,9 @@ struct queue_entry {
   struct queue_entry *next,           /* Next element, if any             */
                      *next_100;       /* 100 elements ahead               */
 
+  u32 id;
+  u8 should_symdict;
+  struct symdict_entry *symdict;
 };
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
@@ -1786,7 +1801,110 @@ check_and_sort:
 }
 
 
+#define ID_LENGTH 6
 
+u32 strtoid(char* str) {
+    int cnt = 0;
+    u32 res = 0;
+    while (*str != '\0') {
+        res = res * 10 + (*str - '0');
+        cnt++;
+        if (cnt > 6) break;
+    }
+}
+
+void idtostr(u32 id, char* str) {
+    int pos = 5;
+    while (pos >= 0) {
+        str[pos] = id%10 + '0';
+        id /= 10;
+        --pos;
+    }
+    str[ID_LENGTH] = '\0';
+}
+
+void cleanup_symdict(struct symdict_data* entries, u32 count) {
+    for (u32 i=0; i < count; ++i) {
+        if (entries[i].str)
+            ck_free(entries[i].str);
+    }
+}
+
+struct symdict_data* parse_symdict_file(u8* fn) {
+    FILE* file = fopen(fn, "rb");
+    if (!file) {
+        SAYF("Failed to open file %s", fn);
+        return NULL;
+    }
+
+    // 读取子结构个数
+    uint32_t count;
+    if (fread(&count, sizeof(uint32_t), 1, file) != 1) {
+        SAYF("Failed to read count");
+        fclose(file);
+        return NULL;
+    }
+
+    // 分配内存保存所有子结构
+    struct symdict_data* entries = ck_alloc(count * sizeof(struct symdict_data));
+    cur_symdict_len = count;
+
+    for (uint32_t i = 0; i < count; i++) {
+        // 读取begin和end
+        if (fread(&entries[i].begin, sizeof(uint32_t), 1, file) != 1 ||
+            fread(&entries[i].end, sizeof(uint32_t), 1, file) != 1) {
+            SAYF("Failed to read entry bounds");
+            cleanup_symdict(entries, count);
+        }
+
+        // 读取字符串长度
+        if (fread(&entries[i].len, sizeof(uint8_t), 1, file) != 1) {
+            SAYF("Failed to read string length");
+            cleanup_symdict(entries, count);
+        }
+
+        // 分配字符串内存 (+1 for null terminator)
+        entries[i].str = ck_alloc(entries[i].len + 1);
+        if (!entries[i].str) {
+            SAYF("Failed to allocate string memory");
+            cleanup_symdict(entries, count);
+        }
+
+        // 读取字符串内容
+        if (fread(entries[i].str, sizeof(uint8_t), entries[i].len, file) != entries[i].len) {
+            SAYF("Failed to read string");
+            cleanup_symdict(entries, count);
+        }
+
+        // 添加null终止符
+        entries[i].str[entries[i].len] = '\0';
+    }
+
+    fclose(file);
+    return entries;
+}
+
+struct symdict_data* load_symdict(u8* dir, u32 seed_id) {
+    ACTF("Finding symdict for '%s' ...", seed_id);
+    char fname[ID_LENGTH + 1];
+    idtostr(seed_id, fname);
+    u8* fn = alloc_printf("%s/%s", dir, fname);
+    struct stat st;
+
+    if (lstat(fn, &st) || access(fn, R_OK)) {
+        SAYF("Unable to access '%s'", fn);
+        return NULL;
+    }
+    if (!S_ISREG(st.st_mode) || !st.st_size) {
+        return NULL;
+    }
+    if (st.st_size > 1024)
+        FATAL("Symdict '%s' is too big (%s, limit is %s)", fn, DMS(st.st_size), DMS(MAX_DICT_FILE));
+
+    struct symdict_data* res = parse_symdict_file(fn);
+    ck_free(fn);
+    return res;
+}
 
 /* Helper function for maybe_add_auto() */
 
@@ -5147,13 +5265,13 @@ static u8 fuzz_one(char** argv) {
      testing in earlier, resumed runs (passed_det). */
 
   if (skip_deterministic || queue_cur->was_fuzzed || queue_cur->passed_det)
-    goto havoc_stage;
+    goto custom_mutator;
 
   /* Skip deterministic fuzzing if exec path checksum puts this out of scope
      for this master instance. */
 
   if (master_max && (queue_cur->exec_cksum % master_max) != master_id - 1)
-    goto havoc_stage;
+    goto custom_mutator;
 
   doing_det = 1;
 
@@ -6112,6 +6230,20 @@ skip_extras:
 
   if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
 
+custom_mutator:
+
+symdict_stage:
+
+if (!queue_cur->should_symdict)
+    goto havoc_stage;
+
+cur_symdict = load_symdict(symdict_dir, queue_cur->id);
+if (cur_symdict == NULL)
+    goto havoc_stage;
+
+
+
+
   /****************
    * RANDOM HAVOC *
    ****************/
@@ -6656,7 +6788,7 @@ retry_splicing:
     out_buf = ck_alloc_nozero(len);
     memcpy(out_buf, in_buf, len);
 
-    goto havoc_stage;
+    goto custom_mutator;
 
   }
 
@@ -7782,7 +7914,7 @@ int main(int argc, char** argv) {
   u32 sync_interval_cnt = 0, seek_to;
   u8  *extras_dir = 0;
   // symblic analysis extracted dictionary
-  u8  *sym_dict_dir = 0;
+  u8  *symdict_dir = 0;
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
   char** use_argv;
@@ -7858,8 +7990,8 @@ int main(int argc, char** argv) {
         break;
 
       case 'X': {/* symbolic dictionary */
-        if (sym_dict_dir) FATAL("Multiple -X options (sym extracted dictionary) not supported");
-        sym_dict_dir = optarg;
+        if (symdict_dir) FATAL("Multiple -X options (sym extracted dictionary) not supported");
+        symdict_dir = optarg;
         break;
       }
 
