@@ -42,6 +42,7 @@
 #include "debug.h"
 #include "alloc-inl.h"
 #include "hash.h"
+#include "xxhash.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -329,7 +330,8 @@ enum {
   /* 13 */ STAGE_EXTRAS_UI,
   /* 14 */ STAGE_EXTRAS_AO,
   /* 15 */ STAGE_HAVOC,
-  /* 16 */ STAGE_SPLICE
+  /* 16 */ STAGE_SPLICE,
+  /* 17 */ STAGE_SYMDICT
 };
 
 /* Stage value types */
@@ -5113,6 +5115,20 @@ static u8 could_be_interest(u32 old_val, u32 new_val, u8 blen, u8 check_le) {
 
 }
 
+void replace_with_random(u8* out_buf, u32 begin, u32 end) {
+    s32 len = queue_cur->len;
+    u32 cur = begin;
+    while (cur + 8 < end && cur + 8 < len) {
+        u64* old = (u64*)(out_buf + cur);
+        u64 val = XXH64(old , 64, cur);
+        *old = val;
+        cur += 8;
+    }
+    while (cur <= end && cur < len) {
+        out_buf[cur] = rand()%256;
+        ++cur;
+    }
+}
 
 /* Take the current entry from the queue, fuzz it for a while. This
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
@@ -6241,7 +6257,83 @@ cur_symdict = load_symdict(symdict_dir, queue_cur->id);
 if (cur_symdict == NULL)
     goto havoc_stage;
 
+/*
+尝试从文件靠后往前的字段替换为字典值，
+如果没有与effmap重合，那么低概率保留
+后面的字段有一定概率保留，越长的字段保留概率越高
+*/
 
+  stage_name = "sym dictionary";
+  stage_short = "symdict";
+  stage_cur = 0;
+  // ?
+  stage_max = cur_symdict_len;
+
+  orig_hit_cnt = new_hit_cnt;
+
+  u8 keep_this_dict = 1, last_applied_dict = 1;
+  u32 orig_len = len;
+  u8 max_len = 0, min_len = 255;
+  u8 max_eff = 0, min_eff = 255;
+
+  for (int i = cur_symdict_len - 1; i >= 0; --i) {
+    stage_cur = i;
+    stage_cur_byte = cur_symdict[i].begin;
+
+    max_len = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
+    min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
+
+    // resize out_buf
+    if (len < cur_symdict[i].end) {
+        ck_realloc(out_buf, cur_symdict[i].end);
+        len = cur_symdict[i].end;
+    }
+
+    // apply this dict word
+    for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+        out_buf[j] = cur_symdict[i].str[j-cur_symdict[i].begin];
+    }
+
+    // fuzz
+    u32 last_queued = queued_discovered;
+    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+
+    // recover?
+    u32 cnt = 0;
+    for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+        if (EFF_APOS(j) > orig_len) break;
+        cnt += eff_map[EFF_APOS(j)];
+    }
+    max_eff = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
+    min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
+
+    double p = 0.5 * ((double)(cnt - min_eff) / (double)(max_eff - cnt))
+                + 0.5 * ((double)(cur_symdict[i].len - min_len) / (double)(max_len - cur_symdict[i].len));
+
+    if (queued_discovered > last_queued) p *= 1.5;
+    if (p > 0.5) keep_this_dict = 1;
+
+    if (!keep_this_dict) {
+        if (unlikely(last_applied_dict)) {
+            ck_realloc(out_buf, cur_symdict[i].begin - 1);
+            len = cur_symdict[i].begin - 1;
+        }
+        else {
+            replace_with_random(out_buf, cur_symdict[i].begin, cur_symdict[i].end);
+        }
+    }
+    else {
+        last_applied_dict = 0;
+    }
+
+    stage_cur++;
+
+  }
+
+  new_hit_cnt = queued_paths + unique_crashes;
+
+  stage_finds[STAGE_SYMDICT]  += new_hit_cnt - orig_hit_cnt;
+  stage_cycles[STAGE_SYMDICT] += stage_max;
 
 
   /****************
