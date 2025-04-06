@@ -161,6 +161,15 @@ static s32 shm_id;                    /* ID of the SHM region             */
 static s32 bb_bitmap_shm_id;
 EXP_ST u8* bb_bitmap;
 
+// parent node of each edge
+u32 total_conditional_edge;
+u32 hash_to_edge_id[MAP_SIZE];
+u32 edge_id_to_hash[MAP_SIZE];
+u32 cond_edge_parent[MAP_SIZE]; // edge id -> parent
+u8 num_cond_edge_sons[MAP_SIZE];
+u32* cond_edge_son[MAP_SIZE];   // parent id -> sons
+
+
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
                    child_timed_out;   /* Traced process timed out?        */
@@ -1800,8 +1809,53 @@ check_and_sort:
 
 }
 
+// line: parent_id | number of sons | son...
+void load_edges_file(u8* fname) {
+    FILE* file = fopen(fname, "rb");
+    if (!file) PFATAL("Unable to open edge file", fname);
 
+    while (!feof(file)) {
+        u32 parent_id;
+        u8 num_son;
 
+        if (fread(&parent_id, sizeof(u32), 1, file) != 1) {
+            if (feof(file)) break; // 文件正常结束
+            PFATAL("Failed to read parent_id");
+        }
+
+        if (parent_id > MAP_SIZE) {
+            PFATAL("Parent id read from edge file is bigger than mapsize %s", MAP_SIZE);
+        }
+
+        if (fread(&num_son, sizeof(u8), 1, file) != 1) {
+            PFATAL("Failed to read child_count");
+        }
+
+        // 为子节点数组分配内存
+        u32* sons = ck_alloc(num_son * sizeof(u32));
+
+        // 读取子节点ID
+        if (fread(sons, sizeof(u32), num_son, file) != num_son) {
+            ck_free(sons);
+            PFATAL("Failed to read children");
+        }
+
+        num_cond_edge_sons[parent_id] = num_son;
+        cond_edge_son[parent_id] = sons;
+        for (int i=0;i<num_son;++i) {
+            if (sons[i] > MAP_SIZE) {
+                ck_free(sons);
+                PFATAL("son id read from edge file is bigger than mapsize %s", MAP_SIZE);
+            }
+            cond_edge_parent[total_conditional_edge] = parent_id;
+            hash_to_edge_id[(parent_id >> 1) ^ sons[i]] = total_conditional_edge;
+            edge_id_to_hash[total_conditional_edge] = (parent_id >> 1) ^ sons[i];
+            total_conditional_edge++;
+        }
+    }
+
+    fclose(file);
+}
 
 /* Helper function for maybe_add_auto() */
 
