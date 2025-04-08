@@ -28,6 +28,7 @@
 
 */
 
+#include <stdint.h>
 #define AFL_MAIN
 #include "android-ashmem.h"
 #define MESSAGES_TO_STDOUT
@@ -56,6 +57,9 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+
+#include <math.h>
+#include <float.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -158,18 +162,6 @@ static u8  var_bytes[MAP_SIZE];       /* Bytes that appear to be variable */
 
 static s32 shm_id;                    /* ID of the SHM region             */
 
-static s32 bb_bitmap_shm_id;
-EXP_ST u8* bb_bitmap;
-
-// parent node of each edge
-u32 total_conditional_edge;
-u32 hash_to_edge_id[MAP_SIZE];
-u32 edge_id_to_hash[MAP_SIZE];
-u32 cond_edge_parent[MAP_SIZE]; // edge id -> parent
-u8 num_cond_edge_sons[MAP_SIZE];
-u32* cond_edge_son[MAP_SIZE];   // parent id -> sons
-
-
 static volatile u8 stop_soon,         /* Ctrl-C pressed?                  */
                    clear_screen = 1,  /* Window resized?                  */
                    child_timed_out;   /* Traced process timed out?        */
@@ -254,6 +246,10 @@ struct queue_entry {
 
   u8* fname;                          /* File name for the test case      */
   u32 len;                            /* Input length                     */
+  u32 id;
+
+  u32 sched_times;
+  u64 max_inc_hit_cnt;
 
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
@@ -349,6 +345,72 @@ enum {
 };
 
 
+struct queue_vec {
+    struct queue_entry** data;
+    u32 capacity;
+    u32 len;
+};
+struct queue_vec seed_queue_vec;
+
+static s32 bb_bitmap_shm_id;
+EXP_ST u8* bb_bitmap;
+
+u64 total_sched_times;
+u64 avg_sched_times;
+
+// parent node of each edge
+u32 total_conditional_edge;
+u32 hash_to_edge_id[MAP_SIZE];
+u32 edge_id_to_hash[MAP_SIZE];
+u32 cond_edge_parent[MAP_SIZE]; // edge id -> parent
+u8 num_cond_edge_sons[MAP_SIZE];
+u32* cond_edge_son[MAP_SIZE];   // parent id -> sons
+
+double frontier_edge_weight[MAP_SIZE];
+u32 frontier_bb_sched_times[MAP_SIZE];
+u64 frontier_parent_exec_time[MAP_SIZE]; // total exec time of seeds that reaches this parent block
+u64 useful_exec_time[MAP_SIZE]; // sum of exec time that useful to this parent bb
+
+double max_weight[MAP_SIZE]; // weight of this frontier bb
+double global_max_weight = -DBL_MAX;
+u32 global_max_weight_frontier = UINT32_MAX;    // global best frontier
+
+struct queue_entry* frontier_bb_top_rated[MAP_SIZE]; // most promising seed that covers this bb
+struct queue_vec frontier_bb_seed[MAP_SIZE]; // seeds that covers parent bb
+
+void queue_vec_push_back(struct queue_vec* vec, struct queue_entry* q) {
+    if (vec->data == NULL) {
+        vec->capacity = 100;
+        vec->data = ck_alloc(100 * sizeof(struct queue_entry*));
+    }
+    if (vec->len + 1 > vec->capacity) {
+        u32 new_cap = vec->capacity + vec->capacity / 2 + 1;
+        ck_realloc(vec->data, new_cap * sizeof(struct queue_entry*));
+        vec->capacity = new_cap;
+    }
+    vec->data[vec->len] = q;
+    vec->len++;
+}
+
+void seed_list_push_back(u32 edge_hash, struct queue_entry* q) {
+    if (frontier_bb_seed[edge_hash].data == NULL) {
+        frontier_bb_seed[edge_hash].capacity = 8;
+        frontier_bb_seed[edge_hash].data = ck_alloc(frontier_bb_seed[edge_hash].capacity * sizeof(struct queue_entry*));
+    }
+    if (frontier_bb_seed[edge_hash].len + 1 > frontier_bb_seed[edge_hash].capacity) {
+        frontier_bb_seed[edge_hash].capacity = frontier_bb_seed[edge_hash].capacity + 1 + frontier_bb_seed[edge_hash].capacity / 2;
+        frontier_bb_seed[edge_hash].data =
+            ck_realloc(frontier_bb_seed[edge_hash].data, frontier_bb_seed[edge_hash].capacity * sizeof(struct queue_entry*));
+    }
+    frontier_bb_seed[edge_hash].data[frontier_bb_seed[edge_hash].len] = q;
+    frontier_bb_seed[edge_hash].len++;
+}
+
+void clean_frontier_bb_seed(u32 edge_hash) {
+    frontier_bb_seed[edge_hash].len = 0;
+    frontier_bb_seed[edge_hash].capacity = 1;
+    ck_realloc(frontier_bb_seed[edge_hash].data, sizeof(struct queue_entry*));
+}
 /* Get unix time in milliseconds */
 
 static u64 get_cur_time(void) {
@@ -810,6 +872,97 @@ static void mark_as_redundant(struct queue_entry* q, u8 state) {
 
 }
 
+static inline u8 is_reached(u32 node, u8 *virgin_bits) {
+  return virgin_bits[node] != 0xff;
+}
+
+
+
+static struct queue_entry* get_least_sched_seed(u32 parent) {
+    u32 len = frontier_bb_seed[parent].len;
+    u64 mintime = UINT64_MAX;
+    struct queue_entry* res = NULL;
+    for (int i=0;i<len;++i) {
+        struct queue_entry* q = frontier_bb_seed[parent].data[i];
+        if (mintime > (1 + q->sched_times) * q->exec_us) {
+            mintime = (1 + q->sched_times) * q->exec_us;
+            res = q;
+        }
+    }
+
+    // also update top_rated to least sched
+    if (res != NULL)
+        frontier_bb_top_rated[parent] = res;
+
+    return res;
+}
+
+void update_frontier_bb_top_rated( struct queue_entry* q, u32 increased_hit_count) {
+    u32 parent = global_max_weight_frontier;
+    struct queue_entry* top_q = frontier_bb_top_rated[parent];
+    if (top_q == NULL) {
+        frontier_bb_top_rated[parent] = q;
+        top_q = q;
+    }
+    else {
+        q->max_inc_hit_cnt = increased_hit_count * q->exec_us;
+        if (q->max_inc_hit_cnt > top_q->max_inc_hit_cnt)
+            frontier_bb_top_rated[parent] = q;
+    }
+}
+
+void update_frontier_bb_weight(u32 parent) {
+    struct queue_entry* top_q = frontier_bb_top_rated[parent];
+    if (top_q == NULL) return;
+    double rate = -log(frontier_parent_exec_time[parent]) - log1p(frontier_bb_sched_times[parent]);
+    rate += log(top_q->exec_us) + log1p(top_q->sched_times);
+
+    if (rate > max_weight[parent]) {
+        max_weight[parent] = rate;
+    }
+    if (rate > global_max_weight) {
+        global_max_weight = rate;
+        global_max_weight_frontier = parent;
+    }
+
+}
+
+void update_frontier_bb_seed(struct queue_entry* q) {
+    u32 map_size_batched = (MAP_SIZE + 7) >> 3;
+    u64* trace_bits_batched = (u64*) trace_bits;
+    // Check a sparse array faster by batching eight u8 ptrs as one u64 ptr.
+    for (u32 i = 0; i < map_size_batched; i++) {
+      if (likely(!trace_bits_batched[i]))
+        continue;
+
+      u8 *cur_trace_bit = (u8 *)(trace_bits_batched + i);
+
+      for (u32 j = 0; j < 8; j++){
+        if (!cur_trace_bit[j]) continue;
+
+        u32 parent_id = i * 8 + j;
+        u32 num_of_sons = num_cond_edge_sons[parent_id];
+
+        frontier_parent_exec_time[parent_id] += q->exec_us;
+
+        if (num_of_sons < 2) continue;
+
+        for (int i=0; i < num_of_sons; ++i) {
+            u32 son_id = cond_edge_son[parent_id][i];
+            u32 edge_hash = (parent_id >> 1) ^ son_id;
+            if (is_reached(edge_hash, virgin_bits)) {
+                clean_frontier_bb_seed(edge_hash);
+                continue;
+            }
+
+            seed_list_push_back(edge_hash, q);
+
+        }
+
+        update_frontier_bb_weight(parent_id);
+      }
+    }
+}
 
 /* Append new test case to the queue. */
 
@@ -819,6 +972,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   q->fname        = fname;
   q->len          = len;
+  q->id           = queued_paths;
   q->depth        = cur_depth + 1;
   q->passed_det   = passed_det;
 
@@ -846,6 +1000,8 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   last_path_time = get_cur_time();
 
+  queue_vec_push_back(&seed_queue_vec, q);
+  update_frontier_bb_seed(q);
 }
 
 
@@ -5081,43 +5237,50 @@ static u8 fuzz_one(char** argv) {
   u8  a_collect[MAX_AUTO_EXTRA];
   u32 a_len = 0;
 
-#ifdef IGNORE_FINDS
-
-  /* In IGNORE_FINDS mode, skip any entries that weren't in the
-     initial data set. */
-
-  if (queue_cur->depth > 1) return 1;
-
-#else
-
-  if (pending_favored) {
-
-    /* If we have any favored, non-fuzzed new arrivals in the queue,
-       possibly skip to them at the expense of already-fuzzed or non-favored
-       cases. */
-
-    if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
-        UR(100) < SKIP_TO_NEW_PROB) return 1;
-
-  } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
-
-    /* Otherwise, still possibly skip non-favored cases, albeit less often.
-       The odds of skipping stuff are higher for already-fuzzed inputs and
-       lower for never-fuzzed entries. */
-
-    if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
-
-      if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
-
-    } else {
-
-      if (UR(100) < SKIP_NFAV_OLD_PROB) return 1;
-
-    }
-
+  u32 PROB = 60;
+  if ((queue_cur->was_fuzzed || !queue_cur->favored)) PROB = 90;
+  else if (queue_cycle > 1 && !queue_cur->was_fuzzed) PROB = 75;
+  u8 use_top_rated = UR(100) < PROB;
+  if (global_max_weight_frontier != UINT32_MAX) {
+      queue_cur = use_top_rated ? frontier_bb_top_rated[global_max_weight_frontier] : queue_cur;
   }
+// #ifdef IGNORE_FINDS
 
-#endif /* ^IGNORE_FINDS */
+//   /* In IGNORE_FINDS mode, skip any entries that weren't in the
+//      initial data set. */
+
+//   if (queue_cur->depth > 1) return 1;
+
+// #else
+
+//   if (pending_favored) {
+
+//     /* If we have any favored, non-fuzzed new arrivals in the queue,
+//        possibly skip to them at the expense of already-fuzzed or non-favored
+//        cases. */
+
+//     if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
+//         UR(100) < SKIP_TO_NEW_PROB) return 1;
+
+//   } else if (!dumb_mode && !queue_cur->favored && queued_paths > 10) {
+
+//     /* Otherwise, still possibly skip non-favored cases, albeit less often.
+//        The odds of skipping stuff are higher for already-fuzzed inputs and
+//        lower for never-fuzzed entries. */
+
+//     if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
+
+//       if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
+
+//     } else {
+
+//       if (UR(100) < SKIP_NFAV_OLD_PROB) return 1;
+
+//     }
+
+//   }
+
+// #endif /* ^IGNORE_FINDS */
 
   if (not_on_tty) {
     ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
@@ -6181,6 +6344,8 @@ skip_extras:
 
   if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
 
+custom_mutator:
+
   /****************
    * RANDOM HAVOC *
    ****************/
@@ -6739,6 +6904,8 @@ abandon_entry:
 
   /* Update pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
+  if (use_top_rated)
+      update_frontier_bb_top_rated(struct queue_entry *q, new_hit_cnt - orig_hit_cnt);
 
   if (!stop_soon && !queue_cur->cal_failed && !queue_cur->was_fuzzed) {
     queue_cur->was_fuzzed = 1;
