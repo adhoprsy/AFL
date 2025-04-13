@@ -6905,7 +6905,7 @@ abandon_entry:
   /* Update pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
   if (use_top_rated)
-      update_frontier_bb_top_rated(struct queue_entry *q, new_hit_cnt - orig_hit_cnt);
+      update_frontier_bb_top_rated(queue_cur, new_hit_cnt - orig_hit_cnt);
 
   if (!stop_soon && !queue_cur->cal_failed && !queue_cur->was_fuzzed) {
     queue_cur->was_fuzzed = 1;

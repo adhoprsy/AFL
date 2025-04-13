@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <fcntl.h>
 #include <llvm-15/llvm/IR/Value.h>
 #include <llvm-15/llvm/Support/raw_ostream.h>
 #define UNIQUE_ID_PASS
@@ -14,6 +16,8 @@
 #include <thread>
 #include <unistd.h>
 #include <chrono>
+#include <fstream>
+#include <sys/file.h>
 
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
@@ -44,7 +48,7 @@ class UniqueID : public ModulePass {
 
 public:
   static char ID;
-  std::unordered_map<uint64_t, std::unordered_set<uint64_t>> childs_map;
+  std::unordered_map<uint32_t, std::unordered_set<uint32_t>> childs_map;
 
   UniqueID() : ModulePass(ID) {}
 
@@ -59,7 +63,7 @@ public:
 class UniqueID : public PassInfoMixin<UniqueID> {
   public:
 
-  std::unordered_map<uint64_t, std::unordered_set<uint64_t>> childs_map;
+  std::unordered_map<uint32_t, std::unordered_set<uint32_t>> childs_map;
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
   static bool isRequired() { return true; }
@@ -86,7 +90,7 @@ llvmGetPassPluginInfo() {
 char UniqueID::ID = 0;
 #endif
 
-uint64_t read_id_from_metadata(MDNode* MD) {
+uint32_t read_id_from_metadata(MDNode* MD) {
   if (MD && MD->getNumOperands() >= 1) {
     if (ConstantInt *CI = mdconst::dyn_extract<ConstantInt>(MD->getOperand(0))) {
       uint64_t id = CI->getZExtValue();
@@ -95,10 +99,6 @@ uint64_t read_id_from_metadata(MDNode* MD) {
   }
   return 0;
 }
-
-#if LLVM_VERSION_MAJOR <= 11
-bool UniqueID::runOnModule(Module &M) {
-#else
 
 std::string get_function_filename(const Function &F) {
     if (DISubprogram *SP = F.getSubprogram()) {
@@ -109,7 +109,7 @@ std::string get_function_filename(const Function &F) {
     return "";
 }
 
-uint64_t generate_bb_hash(const BasicBlock* BB) {
+uint32_t generate_bb_hash(const BasicBlock* BB) {
   std::string BBContent;
   raw_string_ostream os(BBContent);
   for (const auto& I : *BB) {
@@ -130,11 +130,54 @@ uint64_t generate_bb_hash(const BasicBlock* BB) {
   // errs() << get_function_filename(*BB->getParent()) << "\n";
 
   std::hash<std::string> hasher;
-  return hasher(os.str()) % MAP_SIZE;
+  return static_cast<uint32_t>(hasher(os.str()) % MAP_SIZE);
 }
 
-PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
+void write_edge(int fd, uint32_t bb_id, const std::unordered_set<uint32_t>& sons) {
 
+  int _ =::write(fd,reinterpret_cast<const char*>(&bb_id), sizeof(uint32_t));
+
+  uint8_t num = static_cast<uint8_t>(sons.size());
+  _ = ::write(fd,reinterpret_cast<const char*>(&num), sizeof(uint8_t));
+
+  for (auto & son: sons) {
+    _ = ::write(fd, reinterpret_cast<const char*>(&son), sizeof(uint32_t));
+  }
+
+  _ = ::write(fd, "\n", 1);
+}
+
+void write_edge_info(const std::unordered_map<uint32_t, std::unordered_set<uint32_t>> mp) {
+  // 获取环境变量指定的文件路径（默认值：bb_info.txt）
+  const char* path = std::getenv("EDGE_INFO_OUTPUT_PATH");
+  if (!path) {
+    FATAL("env EDGE_INFO_OUTPUT_PATH should be provided");
+    path = "./bb_info.txt";
+  }
+
+  // 打开文件（追加模式）
+  auto fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+  if (fd == -1) {
+    FATAL("unable to open edge info output path");
+    return;
+  }
+
+  // 获取文件描述符并加锁
+  if (flock(fd, LOCK_EX) != 0) return;  // 阻塞锁
+
+  for (auto& [bb, sons] : mp) {
+    write_edge(fd, bb, sons);
+  }
+
+  // 解锁并关闭
+  flock(fd, LOCK_UN);
+  ::close(fd);
+}
+
+#if LLVM_VERSION_MAJOR <= 11
+bool UniqueID::runOnModule(Module &M) {
+#else
+PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
 #endif
 
   // unsigned random_seed =
@@ -172,9 +215,11 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
 
         if (!terminator->hasMetadata(M.getMDKindID("basicblock.id"))) {
           // uint64_t raw_id = distr(gen);
+          #ifdef DEBUG
           errs() << *terminator << "\n";
-          uint64_t raw_id = generate_bb_hash(&BB);
-          MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(BB.getContext()), raw_id)));
+          #endif
+          uint32_t raw_id = generate_bb_hash(&BB);
+          MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
           terminator->setMetadata(M.getMDKindID("basicblock.id"), node);
           inst_blocks++;
         }
@@ -189,17 +234,19 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
           IRBuilder<> IRB(&(*IP));
           if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) {
             // uint64_t raw_id = distr(gen);
+            #ifdef DEBUG
             errs() << *term << "\n";
-            uint64_t raw_id = generate_bb_hash(succ);
+            #endif
+            uint32_t raw_id = generate_bb_hash(succ);
 
             childs_map[parent_id].insert(raw_id);
 
-            MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(BB.getContext()), raw_id)));
+            MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
             term->setMetadata(M.getMDKindID("basicblock.id"), node);
             inst_blocks++;
           }
           else {
-            uint64_t child_id =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
+            uint32_t child_id =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
             childs_map[parent_id].insert(child_id);
           }
         }
@@ -213,8 +260,8 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
 
         if (!terminator->hasMetadata(M.getMDKindID("basicblock.id"))) {
           // uint64_t raw_id = distr(gen);
-          uint64_t raw_id = generate_bb_hash(&BB);
-          MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(BB.getContext()), raw_id)));
+          uint32_t raw_id = generate_bb_hash(&BB);
+          MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
           terminator->setMetadata(M.getMDKindID("basicblock.id"), node);
           inst_blocks++;
         }
@@ -227,14 +274,14 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
           IRBuilder<> IRB(&(*IP));
           if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) {
             // uint64_t raw_id = distr(gen);
-            uint64_t raw_id = generate_bb_hash(succ);
+            uint32_t raw_id = generate_bb_hash(succ);
             childs_map[parent_id].insert(raw_id);
-            MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(BB.getContext()), raw_id)));
+            MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
             term->setMetadata(M.getMDKindID("basicblock.id"), node);
             inst_blocks++;
           }
           else {
-            uint64_t child_id =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
+            uint32_t child_id =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
             childs_map[parent_id].insert(child_id);
           }
         }
@@ -242,6 +289,7 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
     }
 
   OKF("Generated Unique BasicBlock ID for %u locations.", inst_blocks);
+
 #ifdef DEBUG
   for (auto& [parent, set]: childs_map) {
     errs() << "parent: " << parent << "\n" << "children: ";
@@ -251,6 +299,8 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
     errs() << "\n";
   }
 #endif
+
+  write_edge_info(childs_map);
 
 #if LLVM_VERSION_MAJOR <= 11
   return true;

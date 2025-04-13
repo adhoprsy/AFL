@@ -29,6 +29,7 @@
    in ../afl-as.h.
 */
 
+#include <llvm-15/llvm/IR/Constants.h>
 #define AFL_LLVM_PASS
 
 #include "../config.h"
@@ -160,6 +161,11 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
                          GlobalValue::ExternalLinkage, 0, "__afl_area_ptr");
 
+
+  GlobalVariable *BBBitMapPtr =
+          new GlobalVariable(M, PointerType::get(Int8Ty, 0), false,
+                             GlobalValue::ExternalLinkage, 0, "__bb_bitmap_ptr");
+
   GlobalVariable *AFLPrevLoc = new GlobalVariable(
       M, Int32Ty, false, GlobalValue::ExternalLinkage, 0, "__afl_prev_loc", 0,
       GlobalVariable::GeneralDynamicTLSModel, 0, false);
@@ -180,11 +186,14 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       /* Make up cur_loc */
       Instruction* term = BB.getTerminator();
       if (!term) continue;
+      #ifdef DEBUG
       errs() << *term << "\n";
+      #endif
       if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) continue;
       uint64_t cur_loc =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
-
+      #ifdef DEBUG
       errs() <<*term <<  " | cur_loc : " << cur_loc << "\n";
+      #endif
       // unsigned int cur_loc = AFL_R(MAP_SIZE);
 
       ConstantInt *CurLoc = ConstantInt::get(Int32Ty, cur_loc);
@@ -209,7 +218,7 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
       Value *MapPtrIdx =
           IRB.CreateGEP(
- #if LLVM_VERSION_MAJOR >= 14
+#if LLVM_VERSION_MAJOR >= 14
           Int8Ty,
 #endif
           MapPtr, IRB.CreateXor(PrevLocCasted, CurLoc));
@@ -231,6 +240,36 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       StoreInst *Store =
           IRB.CreateStore(ConstantInt::get(Int32Ty, cur_loc >> 1), AFLPrevLoc);
       Store->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      // bb bitmap
+      LoadInst *BBBitMP = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+            PointerType::get(Int8Ty,0),
+#endif
+            BBBitMapPtr);
+      MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      Value *BBBitMapPtrIdx =
+          IRB.CreateGEP(
+#if LLVM_VERSION_MAJOR >= 14
+          Int8Ty,
+#endif
+          BBBitMP, IRB.CreateLShr(CurLoc, ConstantInt::get(Int32Ty, 3)));
+
+      LoadInst* ByteValue = IRB.CreateLoad(
+#if LLVM_VERSION_MAJOR >= 14
+        IRB.getInt8Ty(),
+#endif
+        BBBitMapPtrIdx);
+      ByteValue->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
+      Value *BitPos = IRB.CreateAnd(CurLoc, ConstantInt::get(Int32Ty, 0x7));
+      Value *BitMask = IRB.CreateShl(ConstantInt::get(Int8Ty, 1), BitPos);
+      Value *NewByteValue = IRB.CreateOr(ByteValue, BitMask);
+
+      StoreInst *StoreByte =
+          IRB.CreateStore(NewByteValue, BBBitMapPtrIdx);
+      StoreByte->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
       inst_blocks++;
     }

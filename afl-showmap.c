@@ -59,6 +59,7 @@ static s32 child_pid;                 /* PID of the tested program         */
 static u8* trace_bits;                /* SHM with instrumentation bitmap   */
 
 static u8 *out_file,                  /* Trace output file                 */
+          *bb_bitmap_out_file,
           *doc_path,                  /* Path to docs                      */
           *target_path,               /* Path to target binary             */
           *at_file;                   /* Substitution string for @@        */
@@ -68,6 +69,9 @@ static u32 exec_tmout;                /* Exec timeout (ms)                 */
 static u64 mem_limit = MEM_LIMIT;     /* Memory limit (MB)                 */
 
 static s32 shm_id;                    /* ID of the SHM region              */
+
+static s32 bb_bitmap_shm_id;
+static u8* bb_bitmap;
 
 static u8  quiet_mode,                /* Hide non-essential messages?      */
            edges_only,                /* Ignore hit counts?                */
@@ -139,7 +143,7 @@ static void classify_counts(u8* mem, const u8* map) {
 static void remove_shm(void) {
 
   shmctl(shm_id, IPC_RMID, NULL);
-
+  shmctl(bb_bitmap_shm_id, IPC_RMID, NULL);
 }
 
 
@@ -148,22 +152,30 @@ static void remove_shm(void) {
 static void setup_shm(void) {
 
   u8* shm_str;
+  u8* bb_bitmap_shm_str;
 
   shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+  bb_bitmap_shm_id = shmget(IPC_PRIVATE, MAP_SIZE / 8, IPC_CREAT | IPC_EXCL | 0600);
 
   if (shm_id < 0) PFATAL("shmget() failed");
+  if (bb_bitmap_shm_id < 0) PFATAL("bb_bitmap shmget() failed");
 
   atexit(remove_shm);
 
   shm_str = alloc_printf("%d", shm_id);
+  bb_bitmap_shm_str = alloc_printf("%d", bb_bitmap_shm_id);
 
   setenv(SHM_ENV_VAR, shm_str, 1);
+  setenv(BB_BITMAP_SHM_ENV_VAR, bb_bitmap_shm_str, 1);
 
   ck_free(shm_str);
+  ck_free(bb_bitmap_shm_str);
 
   trace_bits = shmat(shm_id, NULL, 0);
-  
+  bb_bitmap = shmat(bb_bitmap_shm_id, NULL, 0);
+
   if (trace_bits == (void *)-1) PFATAL("shmat() failed");
+  if (bb_bitmap == (void *)-1) PFATAL("shmat() failed");
 
 }
 
@@ -171,7 +183,7 @@ static void setup_shm(void) {
 
 static u32 write_results(void) {
 
-  s32 fd;
+  s32 fd, bbfd;
   u32 i, ret = 0;
 
   u8  cco = !!getenv("AFL_CMIN_CRASHES_ONLY"),
@@ -180,17 +192,21 @@ static u32 write_results(void) {
   if (!strncmp(out_file, "/dev/", 5)) {
 
     fd = open(out_file, O_WRONLY, 0600);
+    bbfd = open(bb_bitmap_out_file, O_WRONLY, 0600);
     if (fd < 0) PFATAL("Unable to open '%s'", out_file);
 
   } else if (!strcmp(out_file, "-")) {
 
     fd = dup(1);
+    bbfd = dup(1);
     if (fd < 0) PFATAL("Unable to open stdout");
 
   } else {
 
     unlink(out_file); /* Ignore errors */
+    unlink(bb_bitmap_out_file); /* Ignore errors */
     fd = open(out_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    bbfd = open(bb_bitmap_out_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) PFATAL("Unable to create '%s'", out_file);
 
   }
@@ -200,8 +216,9 @@ static u32 write_results(void) {
 
     for (i = 0; i < MAP_SIZE; i++)
       if (trace_bits[i]) ret++;
-    
+
     ck_write(fd, trace_bits, MAP_SIZE, out_file);
+    ck_write(bbfd, bb_bitmap, MAP_SIZE >> 3, bb_bitmap_out_file);
     close(fd);
 
   } else {
@@ -225,11 +242,12 @@ static u32 write_results(void) {
       } else fprintf(f, "%06u:%u\n", i, trace_bits[i]);
 
     }
-  
+
     fclose(f);
 
   }
 
+  close(bbfd);
   return ret;
 
 }
@@ -635,7 +653,7 @@ int main(int argc, char** argv) {
 
   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
 
-  while ((opt = getopt(argc,argv,"+o:m:t:A:eqZQbcV")) > 0)
+  while ((opt = getopt(argc,argv,"+o:B:m:t:A:eqZQbcV")) > 0)
 
     switch (opt) {
 
@@ -643,6 +661,11 @@ int main(int argc, char** argv) {
 
         if (out_file) FATAL("Multiple -o options not supported");
         out_file = optarg;
+        break;
+
+      case 'B':
+        if (bb_bitmap_out_file) FATAL("Multiple -b options not supported");
+        bb_bitmap_out_file = optarg;
         break;
 
       case 'm': {
@@ -792,4 +815,3 @@ int main(int argc, char** argv) {
   exit(child_crashed * 2 + child_timed_out);
 
 }
-
