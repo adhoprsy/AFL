@@ -135,8 +135,8 @@ static void edit_params(u32 argc, char** argv) {
 #else
   #if __clang__ && __clang_major__ >= 14
   cc_params[cc_par_cnt++] = "-fexperimental-new-pass-manager";
-  cc_params[cc_par_cnt++] = "-fpass-plugin=../unique-id-pass.so";
-  cc_params[cc_par_cnt++] = "-fpass-plugin=../afl-llvm-pass.so";
+  cc_params[cc_par_cnt++] = alloc_printf("-fpass-plugin=%s/unique-id-pass.so", obj_path);
+  cc_params[cc_par_cnt++] = alloc_printf("-fpass-plugin=%s/afl-llvm-pass.so", obj_path);
   #else
   cc_params[cc_par_cnt++] = "-Xclang";
   cc_params[cc_par_cnt++] = "-load";

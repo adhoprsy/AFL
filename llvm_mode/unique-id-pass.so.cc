@@ -1,7 +1,6 @@
 #include <cstdint>
 #include <fcntl.h>
-#include <llvm-15/llvm/IR/Value.h>
-#include <llvm-15/llvm/Support/raw_ostream.h>
+#include <llvm-15/llvm/IR/CFG.h>
 #define UNIQUE_ID_PASS
 #define AFL_LLVM_PASS
 #include "../config.h"
@@ -17,8 +16,10 @@
 #include <unistd.h>
 #include <chrono>
 #include <fstream>
+#include <filesystem>
 #include <sys/file.h>
 
+#include <llvm/IR/IntrinsicInst.h>
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Instruction.h"
@@ -37,6 +38,7 @@
 
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Debug.h"
+#include <llvm/Support/raw_ostream.h>
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 
 using namespace llvm;
@@ -72,7 +74,7 @@ class UniqueID : public PassInfoMixin<UniqueID> {
 PassPluginLibraryInfo getUniqueIDPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "UniqueIDPass", LLVM_VERSION_STRING,
           [](PassBuilder &PB) {
-            PB.registerOptimizerLastEPCallback(
+            PB.registerPipelineStartEPCallback(
                 [](ModulePassManager &MPM, OptimizationLevel Level) {
                   MPM.addPass(UniqueID());
                 });
@@ -103,32 +105,58 @@ uint32_t read_id_from_metadata(MDNode* MD) {
 std::string get_function_filename(const Function &F) {
     if (DISubprogram *SP = F.getSubprogram()) {
         if (DIFile *File = SP->getFile()) {
-            return File->getFilename().str();
+          auto path = std::filesystem::path(File->getFilename().str());
+          return path.filename().string();
         }
     }
     return "";
 }
 
-uint32_t generate_bb_hash(const BasicBlock* BB) {
+std::string generate_bb_hash_single(const BasicBlock* BB) {
   std::string BBContent;
   raw_string_ostream os(BBContent);
   for (const auto& I : *BB) {
-    os<<I.getOpcode()<<" ";
-    for (const Value *Op : I.operands()) {
-        if (Op->getType()) {
-          Op->getType()->print(os);
-          os << " ";
-        }
+    if (auto* intrinsin = llvm::dyn_cast<llvm::IntrinsicInst>(&I)) {
+      continue;
     }
+    os << I.getOpcode();
+    for (Value* op: I.operands())
+      if (op->getType()) {
+        op->getType()->print(os);
+        if (op->hasName()) os << op->getName();
+        else if (isa<Constant>(op)) os << *op;
+        os << "|";
+      }
   }
   // function name
   os << BB->getParent()->getName();
-  // errs() << BB->getParent()->getName() << " / ";
-
   // file name
   os << get_function_filename(*BB->getParent());
-  // errs() << get_function_filename(*BB->getParent()) << "\n";
 
+  return os.str();
+}
+
+uint32_t generate_bb_hash(const BasicBlock* BB) {
+  std::string BBContent;
+  raw_string_ostream os(BBContent);
+
+  os << generate_bb_hash_single(BB) << "$$";
+  if(!pred_empty(BB)) {
+    for (const BasicBlock* pred: predecessors(BB)) {
+      os << generate_bb_hash_single(pred) << "$$";
+    }
+  }
+
+  auto* term = BB->getTerminator();
+  if (term->getNumSuccessors() > 0) {
+    for (const BasicBlock* succ: successors(BB)) {
+      os << generate_bb_hash_single(succ) << "$$";
+    }
+  }
+
+  // errs() << "=======================\n";
+  // errs() << os.str() << "\n";
+  // errs() << "=======================\n";
   std::hash<std::string> hasher;
   return static_cast<uint32_t>(hasher(os.str()) % MAP_SIZE);
 }
@@ -143,11 +171,10 @@ void write_edge(int fd, uint32_t bb_id, const std::unordered_set<uint32_t>& sons
   for (auto & son: sons) {
     _ = ::write(fd, reinterpret_cast<const char*>(&son), sizeof(uint32_t));
   }
-
-  _ = ::write(fd, "\n", 1);
 }
 
 void write_edge_info(const std::unordered_map<uint32_t, std::unordered_set<uint32_t>> mp) {
+
   // 获取环境变量指定的文件路径（默认值：bb_info.txt）
   const char* path = std::getenv("EDGE_INFO_OUTPUT_PATH");
   if (!path) {
@@ -155,6 +182,7 @@ void write_edge_info(const std::unordered_map<uint32_t, std::unordered_set<uint3
     path = "./bb_info.txt";
   }
 
+  errs() << "writing edge info to : " << path << "\n";
   // 打开文件（追加模式）
   auto fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0666);
   if (fd == -1) {
@@ -165,6 +193,8 @@ void write_edge_info(const std::unordered_map<uint32_t, std::unordered_set<uint3
   // 获取文件描述符并加锁
   if (flock(fd, LOCK_EX) != 0) return;  // 阻塞锁
 
+  uint32_t line_num = mp.size();
+  int _ =::write(fd,reinterpret_cast<const char*>(&line_num), sizeof(uint32_t));
   for (auto& [bb, sons] : mp) {
     write_edge(fd, bb, sons);
   }
@@ -215,16 +245,17 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
 
         if (!terminator->hasMetadata(M.getMDKindID("basicblock.id"))) {
           // uint64_t raw_id = distr(gen);
-          #ifdef DEBUG
-          errs() << *terminator << "\n";
-          #endif
           uint32_t raw_id = generate_bb_hash(&BB);
           MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
           terminator->setMetadata(M.getMDKindID("basicblock.id"), node);
           inst_blocks++;
         }
 
-        uint64_t parent_id =read_id_from_metadata(terminator->getMetadata(M.getMDKindID("basicblock.id")));
+        uint32_t parent_id =read_id_from_metadata(terminator->getMetadata(M.getMDKindID("basicblock.id")));
+
+        // errs() << "-----------------------------------------------\n";
+        // errs() << BB << "\n";
+        // errs() << "bb_id: " <<BB.getName() << " | unique_id: " <<parent_id << " | " <<*terminator << "\n";
 
         // assign id for its child
         for (BasicBlock* succ: successors(&BB)) {
@@ -232,15 +263,14 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
           if (!term) continue;
           auto IP = succ->getFirstInsertionPt();
           IRBuilder<> IRB(&(*IP));
+
+          uint32_t ch;
+
           if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) {
             // uint64_t raw_id = distr(gen);
-            #ifdef DEBUG
-            errs() << *term << "\n";
-            #endif
             uint32_t raw_id = generate_bb_hash(succ);
-
             childs_map[parent_id].insert(raw_id);
-
+            ch = raw_id;
             MDNode* node =  MDNode::get(BB.getContext(), ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(BB.getContext()), raw_id)));
             term->setMetadata(M.getMDKindID("basicblock.id"), node);
             inst_blocks++;
@@ -248,7 +278,12 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
           else {
             uint32_t child_id =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
             childs_map[parent_id].insert(child_id);
+            ch = child_id;
           }
+
+          // errs() << "child: " << *succ << "\n";
+          // errs() << "child : " <<ch << " | " <<*term << "\n\n";
+
         }
       }
 
@@ -290,6 +325,8 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
 
   OKF("Generated Unique BasicBlock ID for %u locations.", inst_blocks);
 
+  write_edge_info(childs_map);
+
 #ifdef DEBUG
   for (auto& [parent, set]: childs_map) {
     errs() << "parent: " << parent << "\n" << "children: ";
@@ -299,8 +336,6 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
     errs() << "\n";
   }
 #endif
-
-  write_edge_info(childs_map);
 
 #if LLVM_VERSION_MAJOR <= 11
   return true;
