@@ -35,10 +35,10 @@
 #undef XXH_INLINE_ALL
 
 #ifdef _DEBUG
-u32 hash32(u8 *key, u32 len, u32 seed) {
+static u32 hash32(u8 *key, u32 len, u32 seed) {
 
 #else
-inline u32 hash32(u8 *key, u32 len, u32 seed) {
+static inline u32 hash32(u8 *key, u32 len, u32 seed) {
 
 #endif
 
@@ -47,10 +47,10 @@ inline u32 hash32(u8 *key, u32 len, u32 seed) {
 }
 
 #ifdef _DEBUG
-u64 hash64(u8 *key, u32 len, u64 seed) {
+static u64 hash64(u8 *key, u32 len, u64 seed) {
 
 #else
-inline u64 hash64(u8 *key, u32 len, u64 seed) {
+static inline u64 hash64(u8 *key, u32 len, u64 seed) {
 
 #endif
 

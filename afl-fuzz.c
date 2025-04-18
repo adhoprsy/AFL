@@ -42,7 +42,6 @@
 #include "debug.h"
 #include "alloc-inl.h"
 #include "hash.h"
-#include "xxhash.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -1943,7 +1942,7 @@ struct symdict_data* parse_symdict_file(u8* fn) {
 }
 
 struct symdict_data* load_symdict(u8* dir, u32 seed_id) {
-    ACTF("Finding symdict for '%s' ...", seed_id);
+    ACTF("Finding symdict for '%d' ...", seed_id);
     char fname[ID_LENGTH + 1];
     idtostr(seed_id, fname);
     u8* fn = alloc_printf("%s/%s", dir, fname);
@@ -6885,7 +6884,7 @@ if (cur_symdict == NULL)
   // ?
   stage_max = cur_symdict_len;
 
-  orig_hit_cnt = new_hit_cnt;
+  orig_hit_cnt = queued_paths + unique_crashes;
 
   u8 keep_this_dict = 1, last_applied_dict = 1;
   u8 resized = 0;
