@@ -28,7 +28,6 @@
 
 */
 
-// #include "custom_mutator/custom_mutator.h"
 #define AFL_MAIN
 #include "android-ashmem.h"
 #define MESSAGES_TO_STDOUT
@@ -256,7 +255,7 @@ struct inf_profile {
 
  struct skipdet_entry {
    u8  continue_inf, done_eff;
-   u32 undet_bits, quick_eff_bytes;
+   u32 undet_bits /* trace和virgin_det_bits的差 */, quick_eff_bytes;
 
    u8 *skip_eff_map,                     /* we'v finish the eff_map          */
        *done_inf_map;                    /* some bytes are not done yet      */
@@ -268,7 +267,7 @@ struct inf_profile {
    u8 use_skip_havoc;
    u32 undet_bits_threshold;
    u64 last_cov_undet;
-   u8 *virgin_det_bits;                  /* global fuzzed bits               */
+   u8 *virgin_det_bits;                  /* 全局的未经过确定性变异的边        */
    struct inf_profile *inf_prof;
  };
 
@@ -5105,6 +5104,8 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
   }
 
+  // 检查q cov比virgin_det_bits多的数量，根据此判断是否跳过det
+  // 并且要求仅仅数量多于阈值的时，才更新virgin_det_bits，从而防止每次都小幅度更新，而都不超过阈值
   u32 new_det_bits = 0;
 
   for (u32 i = 0; i < MAP_SIZE; i++) {
@@ -5118,7 +5119,7 @@ u8 should_det_fuzz(struct queue_entry *q) {
   }
 
   if (!skipdet_g->undet_bits_threshold)
-     skipdet_g->undet_bits_threshold = new_det_bits * 0.05;
+     skipdet_g->undet_bits_threshold = new_det_bits * 0.05 < 2 ? 2 : new_det_bits * 0.05;
 
   if (new_det_bits >=  skipdet_g->undet_bits_threshold) {
 
@@ -5129,7 +5130,7 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
       if (unlikely(q->trace_mini[i >> 3] & (1 << (i & 7)))) {
 
-        if (! skipdet_g->virgin_det_bits[i])
+        if (!skipdet_g->virgin_det_bits[i])
            skipdet_g->virgin_det_bits[i] = 1;
 
       }
@@ -5165,7 +5166,7 @@ u8 skip_deterministic_stage( u8 *orig_buf, u8 *out_buf,
    * SKIP INFERENCE *
    ******************/
 
-  stage_short = "inf";
+  stage_short = "infer";
   stage_name = "inference";
   stage_cur = 0;
   orig_hit_cnt = queued_paths + total_crashes;
@@ -5249,15 +5250,16 @@ u8 skip_deterministic_stage( u8 *orig_buf, u8 *out_buf,
 
     }
 
-    skipdet_g->inf_prof->inf_execs_cost +=
-        (total_execs - pre_inf_exec);
+    skipdet_g->inf_prof->inf_execs_cost += (total_execs - pre_inf_exec);
     skipdet_g->inf_prof->inf_time_cost += (get_cur_time() - pre_inf_time);
     // PFATAL("Done, now have %d bytes skipped, with exec %lld, time %lld.\n",
     // afl->inf_skipped_bytes, afl->inf_execs_cost, afl->inf_time_cost);
 
-  } else
+  } else {
 
     memset(inf_eff_map, 1, len);
+
+  }
 
   new_hit_cnt = queued_paths +total_crashes;
 
@@ -5314,12 +5316,12 @@ u8 skip_deterministic_stage( u8 *orig_buf, u8 *out_buf,
      for multiple rounds */
 
   u8 eff_round_continue = 1, eff_round_done = 0, done_eff = 0, repeat_eff = 0,
-     fuzz_nearby = 0, *non_eff_bytes = 0;
+     fuzz_nearby = 0, *non_eff_bytes = 0; /* non_eff_bytes: 当前种子的无关字节 */
 
   u64 before_eff_execs = total_execs;
 
-  if (getenv("REPEAT_EFF")) repeat_eff = 1;
-  if (getenv("FUZZ_NEARBY")) fuzz_nearby = 1;
+  if (getenv("SKIPDET_REPEAT_EFF")) repeat_eff = 1;
+  if (getenv("SKIPDET_FUZZ_NEARBY")) fuzz_nearby = 1;
 
   if (fuzz_nearby) {
 
@@ -5336,31 +5338,21 @@ u8 skip_deterministic_stage( u8 *orig_buf, u8 *out_buf,
     eff_round_continue = 0;
     stage_max = 32 * 1024;
 
-    for (; stage_cur < stage_max && stage_cur < len;
-         ++stage_cur) {
+    for (; stage_cur < stage_max && stage_cur < len; ++stage_cur) {
 
       stage_cur_byte = stage_cur;
 
-      if (!inf_eff_map[stage_cur_byte] ||
-          skip_eff_map[stage_cur_byte])
+      if (!inf_eff_map[stage_cur_byte] || skip_eff_map[stage_cur_byte])
         continue;
 
       if (is_det_timeout(before_det_time, 1)) { goto cleanup_skipdet; }
 
       u8 orig = out_buf[stage_cur_byte], replace = R(256);
-
-      while (replace == orig) {
-
-        replace = R(256);
-
-      }
+      while (replace == orig) replace = R(256);
 
       out_buf[stage_cur_byte] = replace;
-
       before_skip_inf = queued_paths;
-
       if (common_fuzz_stuff(use_argv,out_buf, len)) { return 0; }
-
       out_buf[stage_cur_byte] = orig;
 
       if (fuzz_nearby) {
