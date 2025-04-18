@@ -181,7 +181,8 @@ EXP_ST u32 queued_paths,              /* Total number of queued testcases */
            useless_at_start,          /* Number of useless starting paths */
            var_byte_count,            /* Bitmap bytes with var behavior   */
            current_entry,             /* Current queue entry ID           */
-           havoc_div = 1;             /* Cycle count divisor for havoc    */
+           havoc_div = 1,             /* Cycle count divisor for havoc    */
+           current_edges = 1;             /* Cycle count divisor for havoc    */
 
 EXP_ST u64 total_crashes,             /* Total number of crashes          */
            unique_crashes,            /* Crashes with unique signatures   */
@@ -241,6 +242,7 @@ static s32 cpu_aff = -1;       	      /* Selected CPU core                */
 #endif /* HAVE_AFFINITY */
 
 static FILE* plot_file;               /* Gnuplot output file              */
+static FILE* det_plot_file;               /* Gnuplot output file              */
 
 struct symdict_data {
   u32 begin;
@@ -1863,6 +1865,7 @@ u32 strtoid(char* str) {
         cnt++;
         if (cnt > 6) break;
     }
+    return res;
 }
 
 void idtostr(u32 id, char* str) {
@@ -1875,11 +1878,12 @@ void idtostr(u32 id, char* str) {
     str[ID_LENGTH] = '\0';
 }
 
-void cleanup_symdict(struct symdict_data* entries, u32 count) {
+void* cleanup_symdict(struct symdict_data* entries, u32 count) {
     for (u32 i=0; i < count; ++i) {
         if (entries[i].str)
             ck_free(entries[i].str);
     }
+    return NULL;
 }
 
 struct symdict_data* parse_symdict_file(u8* fn) {
@@ -1897,6 +1901,8 @@ struct symdict_data* parse_symdict_file(u8* fn) {
         return NULL;
     }
 
+    ACTF("Found '%d' lines of dict in %s", count, fn);
+
     // 分配内存保存所有子结构
     struct symdict_data* entries = ck_alloc(count * sizeof(struct symdict_data));
     cur_symdict_len = count;
@@ -1906,26 +1912,26 @@ struct symdict_data* parse_symdict_file(u8* fn) {
         if (fread(&entries[i].begin, sizeof(uint32_t), 1, file) != 1 ||
             fread(&entries[i].end, sizeof(uint32_t), 1, file) != 1) {
             SAYF("Failed to read entry bounds");
-            cleanup_symdict(entries, count);
+            return cleanup_symdict(entries, count);
         }
 
         // 读取字符串长度
         if (fread(&entries[i].len, sizeof(uint8_t), 1, file) != 1) {
             SAYF("Failed to read string length");
-            cleanup_symdict(entries, count);
+            return cleanup_symdict(entries, count);
         }
 
         // 分配字符串内存 (+1 for null terminator)
         entries[i].str = ck_alloc(entries[i].len + 1);
         if (!entries[i].str) {
             SAYF("Failed to allocate string memory");
-            cleanup_symdict(entries, count);
+            return cleanup_symdict(entries, count);
         }
 
         // 读取字符串内容
         if (fread(entries[i].str, sizeof(uint8_t), entries[i].len, file) != entries[i].len) {
             SAYF("Failed to read string");
-            cleanup_symdict(entries, count);
+            return cleanup_symdict(entries, count);
         }
 
         // 添加null终止符
@@ -3685,6 +3691,45 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
 }
 
+void plot_profile_data(struct queue_entry* q) {
+    static u64 last_time = 0;
+
+    u64 current_ms = get_cur_time() - start_time;
+
+    if (!last_time) last_time = current_ms;
+    // update every 10 sec
+    if (current_ms - last_time < 10 * 1000) return;
+
+    current_edges = count_non_255_bytes(virgin_bits);
+    double det_finding_rate = (double)havoc_prof->total_det_edge * 100.0 /
+                                 (double)current_edges,
+              det_time_rate = (double)havoc_prof->total_det_time * 100.0 /
+                              (double)current_ms;
+
+    u32 ndet_bits = 0;
+    for (u32 i = 0; i < MAP_SIZE; i++) {
+
+        if (skipdet_g->virgin_det_bits[i]) ndet_bits += 1;
+
+    }
+
+    double det_fuzzed_rate = (double)ndet_bits * 100.0 / (double)current_edges;
+
+    fprintf(det_plot_file,
+               "[%02lld:%02lld:%02lld] fuzz %d (), find %d/%d among %d(%02.2f) "
+               "and spend %lld/%lld(%02.2f), cover %02.2f yet, %d/%d undet bits, "
+               "continue %d.\n",
+               current_ms / 1000 / 3600, (current_ms / 1000 / 60) % 60,
+               (current_ms / 1000) % 60, current_entry,
+               havoc_prof->edge_det_stage, havoc_prof->edge_havoc_stage,
+               current_edges, det_finding_rate,
+               havoc_prof->det_stage_time / 1000,
+               havoc_prof->havoc_stage_time / 1000, det_time_rate,
+               det_fuzzed_rate, q->skipdet_e->undet_bits,
+               skipdet_g->undet_bits_threshold, q->skipdet_e->continue_inf);
+
+       fflush(det_plot_file);
+}
 
 /* Update the plot file if there is a reason to. */
 
@@ -3714,10 +3759,10 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
      execs_per_sec */
 
   fprintf(plot_file,
-          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f\n",
+          "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %u\n",
           get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
-          unique_hangs, max_depth, eps); /* ignore errors */
+          unique_hangs, max_depth, eps, current_edges); /* ignore errors */
 
   fflush(plot_file);
 
@@ -5731,6 +5776,13 @@ static u8 fuzz_one(char** argv) {
   orig_perf = perf_score = calculate_score(queue_cur);
 
   u64 before_det_time = get_cur_time();
+
+  u64 before_havoc_time;
+  u32 before_det_findings = queued_paths,
+      before_det_edges = count_non_255_bytes(virgin_bits),
+      before_havoc_findings, before_havoc_edges;
+  u8 is_logged = 0;
+
   if (skipdet_optimization && !skip_deterministic) {
       if (!skip_deterministic_stage(in_buf, out_buf, len, before_det_time)) {
           goto abandon_entry;
@@ -6822,12 +6874,12 @@ if (cur_symdict == NULL)
     goto havoc_stage;
 
 /*
-尝试从文件靠后往前的字段替换为字典值，
+尝试从文件靠后往前的字段替换为字典值，跳过skip_det_eff的部分
 如果没有与effmap重合，那么低概率保留
 后面的字段有一定概率保留，越长的字段保留概率越高
 */
 
-  stage_name = "sym dictionary";
+  stage_name = "symbolic dict";
   stage_short = "symdict";
   stage_cur = 0;
   // ?
@@ -6836,6 +6888,7 @@ if (cur_symdict == NULL)
   orig_hit_cnt = new_hit_cnt;
 
   u8 keep_this_dict = 1, last_applied_dict = 1;
+  u8 resized = 0;
   u32 orig_len = len;
   u8 max_len = 0, min_len = 255;
   u8 max_eff = 0, min_eff = 255;
@@ -6844,6 +6897,15 @@ if (cur_symdict == NULL)
     stage_cur = i;
     stage_cur_byte = cur_symdict[i].begin;
 
+
+    // if non of the byte in symdict is effective, skip
+    u32 cnt = 0;
+    for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+        if (j > orig_len) break;
+        if (skip_eff_map[j]) cnt++;
+    }
+    if (cur_symdict[i].begin < orig_len && cnt == 0) continue;
+
     max_len = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
     min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
 
@@ -6851,6 +6913,7 @@ if (cur_symdict == NULL)
     if (len < cur_symdict[i].end) {
         ck_realloc(out_buf, cur_symdict[i].end);
         len = cur_symdict[i].end;
+        resized = 1;
     }
 
     // apply this dict word
@@ -6863,10 +6926,10 @@ if (cur_symdict == NULL)
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
 
     // recover?
-    u32 cnt = 0;
+    cnt = 0;
     for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
-        if (EFF_APOS(j) > orig_len) break;
-        cnt += eff_map[EFF_APOS(j)];
+        if (j > orig_len) break;
+        cnt += skip_eff_map[j];
     }
     max_eff = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
     min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
@@ -6875,10 +6938,10 @@ if (cur_symdict == NULL)
                 + 0.5 * ((double)(cur_symdict[i].len - min_len) / (double)(max_len - cur_symdict[i].len));
 
     if (queued_discovered > last_queued) p *= 1.5;
-    if (p > 0.5) keep_this_dict = 1;
+    if (p > 0.5 || queued_discovered > last_queued) keep_this_dict = 1;
 
     if (!keep_this_dict) {
-        if (unlikely(last_applied_dict)) {
+        if (unlikely(last_applied_dict) && resized) {
             ck_realloc(out_buf, cur_symdict[i].begin - 1);
             len = cur_symdict[i].begin - 1;
         }
@@ -6899,12 +6962,20 @@ if (cur_symdict == NULL)
   stage_finds[STAGE_SYMDICT]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_SYMDICT] += stage_max;
 
+  cleanup_symdict(cur_symdict, cur_symdict_len);
 
   /****************
    * RANDOM HAVOC *
    ****************/
 
 havoc_stage:
+
+  if (!is_logged) {
+      is_logged = 1;
+      before_havoc_findings = queued_paths;
+      before_havoc_edges = count_non_255_bytes(virgin_bits);
+      before_havoc_time = get_cur_time();
+  }
 
   stage_cur_byte = -1;
 
@@ -7451,6 +7522,19 @@ retry_splicing:
 #endif /* !IGNORE_FINDS */
 
   ret_val = 0;
+
+havoc_prof->queued_det_stage = before_havoc_findings - before_det_findings;
+havoc_prof->queued_havoc_stage = queued_paths - before_havoc_findings;
+havoc_prof->total_queued_det += havoc_prof->queued_det_stage;
+havoc_prof->edge_det_stage = before_havoc_edges - before_det_edges;
+havoc_prof->edge_havoc_stage = count_non_255_bytes(virgin_bits) - before_havoc_edges;
+havoc_prof->total_det_edge += havoc_prof->edge_det_stage;
+havoc_prof->det_stage_time = before_havoc_time - before_det_time;
+havoc_prof->havoc_stage_time = get_cur_time() - before_havoc_time;
+havoc_prof->total_det_time += havoc_prof->det_stage_time;
+
+plot_profile_data(queue_cur);
+
 
 abandon_entry:
 
@@ -8054,8 +8138,17 @@ EXP_ST void setup_dirs_fds(void) {
 
   fprintf(plot_file, "# unix_time, cycles_done, cur_path, paths_total, "
                      "pending_total, pending_favs, map_size, unique_crashes, "
-                     "unique_hangs, max_depth, execs_per_sec\n");
+                     "unique_hangs, max_depth, execs_per_sec, current_edges\n");
                      /* ignore errors */
+
+  tmp = alloc_printf("%s/plot_det_data", out_dir);
+
+  fd = open(tmp, O_WRONLY | O_CREAT, 0600);
+  if (fd < 0) { PFATAL("Unable to create '%s'", tmp); }
+    ck_free(tmp);
+
+  det_plot_file = fdopen(fd, "w");
+  if (!det_plot_file) { PFATAL("fdopen() failed"); }
 
 }
 
