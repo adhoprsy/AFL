@@ -3,9 +3,9 @@
         "arguments": [
             "clang",
             "-c",
-            "-Xclang",
-            "-Xclang",
-            "../afl-llvm-pass.so",
+            "-fexperimental-new-pass-manager",
+            "-fpass-plugin=../unique-id-pass.so",
+            "-fpass-plugin=../afl-llvm-pass.so",
             "-Qunused-arguments",
             "-O3",
             "-funroll-loops",
@@ -31,118 +31,5 @@
         ],
         "directory": "/home/thematch/Desktop/AFL/llvm_mode",
         "file": "../test-instr.c"
-    },
-    {
-        "arguments": [
-            "clang",
-            "-c",
-            "-O3",
-            "-funroll-loops",
-            "-Wall",
-            "-D_FORTIFY_SOURCE=2",
-            "-g",
-            "-Wno-pointer-sign",
-            "-DAFL_PATH=\"/usr/local/lib/afl\"",
-            "-DBIN_PATH=\"/usr/local/bin\"",
-            "-DVERSION=\"2.57b\"",
-            "-fPIC",
-            "-o",
-            "../afl-llvm-rt.o",
-            "afl-llvm-rt.o.c"
-        ],
-        "directory": "/home/thematch/Desktop/AFL/llvm_mode",
-        "file": "afl-llvm-rt.o.c"
-    },
-    {
-        "arguments": [
-            "clang++",
-            "-c",
-            "-I/usr/lib/llvm-15/include",
-            "-std=c++14",
-            "-fno-exceptions",
-            "-D_GNU_SOURCE",
-            "-D__STDC_CONSTANT_MACROS",
-            "-D__STDC_FORMAT_MACROS",
-            "-D__STDC_LIMIT_MACROS",
-            "-fno-rtti",
-            "-fpic",
-            "-O3",
-            "-funroll-loops",
-            "-Wall",
-            "-D_FORTIFY_SOURCE=2",
-            "-g",
-            "-Wno-pointer-sign",
-            "-DVERSION=\"2.57b\"",
-            "-Wno-variadic-macros",
-            "-o",
-            "../afl-llvm-pass.so",
-            "afl-llvm-pass.so.cc"
-        ],
-        "directory": "/home/thematch/Desktop/AFL/llvm_mode",
-        "file": "afl-llvm-pass.so.cc"
-    },
-    {
-        "arguments": [
-            "clang",
-            "-c",
-            "-O3",
-            "-funroll-loops",
-            "-Wall",
-            "-D_FORTIFY_SOURCE=2",
-            "-g",
-            "-Wno-pointer-sign",
-            "-DAFL_PATH=\"/usr/local/lib/afl\"",
-            "-DBIN_PATH=\"/usr/local/bin\"",
-            "-DVERSION=\"2.57b\"",
-            "-o",
-            "../afl-clang-fast",
-            "afl-clang-fast.c"
-        ],
-        "directory": "/home/thematch/Desktop/AFL/llvm_mode",
-        "file": "afl-clang-fast.c"
-    },
-    {
-        "arguments": [
-            "clang",
-            "-c",
-            "-O3",
-            "-funroll-loops",
-            "-Wall",
-            "-D_FORTIFY_SOURCE=2",
-            "-g",
-            "-Wno-pointer-sign",
-            "-DAFL_PATH=\"/usr/local/lib/afl\"",
-            "-DBIN_PATH=\"/usr/local/bin\"",
-            "-DVERSION=\"2.57b\"",
-            "-m32",
-            "-fPIC",
-            "-o",
-            "../afl-llvm-rt-32.o",
-            "afl-llvm-rt.o.c"
-        ],
-        "directory": "/home/thematch/Desktop/AFL/llvm_mode",
-        "file": "afl-llvm-rt.o.c"
-    },
-    {
-        "arguments": [
-            "clang",
-            "-c",
-            "-O3",
-            "-funroll-loops",
-            "-Wall",
-            "-D_FORTIFY_SOURCE=2",
-            "-g",
-            "-Wno-pointer-sign",
-            "-DAFL_PATH=\"/usr/local/lib/afl\"",
-            "-DBIN_PATH=\"/usr/local/bin\"",
-            "-DVERSION=\"2.57b\"",
-            "-m64",
-            "-fPIC",
-            "-o",
-            "../afl-llvm-rt-64.o",
-            "afl-llvm-rt.o.c"
-        ],
-        "directory": "/home/thematch/Desktop/AFL/llvm_mode",
-        "file": "afl-llvm-rt.o.c"
     }
 ]

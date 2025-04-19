@@ -3,13 +3,13 @@
 # -----------------------------
 #
 # Written and maintained by Michal Zalewski <lcamtuf@google.com>
-# 
+#
 # Copyright 2013, 2014, 2015, 2016, 2017 Google LLC All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at:
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
 #
 
@@ -70,7 +70,7 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	ln -sf afl-as as
 
 afl-fuzz: afl-fuzz.c $(COMM_HDR) | test_x86
-	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS) -lm
 
 afl-showmap: afl-showmap.c $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
@@ -88,11 +88,12 @@ ifndef AFL_NO_X86
 
 test_build: afl-gcc afl-as afl-showmap
 	@echo "[*] Testing the CC wrapper and instrumentation output..."
-	unset AFL_USE_ASAN AFL_USE_MSAN; AFL_QUIET=1 AFL_INST_RATIO=100 AFL_PATH=. ./$(TEST_CC) $(CFLAGS) test-instr.c -o test-instr $(LDFLAGS)
-	./afl-showmap -m none -q -o .test-instr0 ./test-instr < /dev/null
-	echo 1 | ./afl-showmap -m none -q -o .test-instr1 ./test-instr
+	unset AFL_USE_ASAN AFL_USE_MSAN; AFL_QUIET=1 AFL_INST_RATIO=100 AFL_PATH=. ./afl-clang-fast $(CFLAGS) test-instr.c -o test-instr $(LDFLAGS)
+	./afl-showmap -m none -b -q -o .test-instr0 -B .test-instr00 ./test-instr < /dev/null
+	echo 1 | ./afl-showmap -m none -b -q -o .test-instr1 -B .test-instr01 ./test-instr
 	@rm -f test-instr
 	@cmp -s .test-instr0 .test-instr1; DR="$$?"; rm -f .test-instr0 .test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
+	@cmp -s .test-instr00 .test-instr01; DR="$$?"; rm -f .test-instr00 .test-instr01; if [ "$$DR" = "0" ]; then echo; echo "Oops, the bb bitmap instrumentation does not seem to be behaving correctly!"; echo; exit 1; fi
 	@echo "[+] All right, the instrumentation seems to be working!"
 
 else

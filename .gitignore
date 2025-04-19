@@ -27,3 +27,4 @@ test
 .clang-format
 .zed/
 compile_commands.json
+unique-id-pass.so
