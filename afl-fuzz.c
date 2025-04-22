@@ -143,6 +143,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            deferred_mode,             /* Deferred forkserver mode?        */
            fast_cal,                  /* Try to calibrate faster?         */
            skipdet_optimization,
+           enable_symdict = 1,
            is_synced_from_outside;
 
 static s32 out_fd,                    /* Persistent fd for out_file       */
@@ -327,6 +328,10 @@ struct queue_entry {
   u8 should_symdict;
   struct symdict_entry *symdict;
   struct skipdet_entry *skipdet_e;
+
+  u8 has_symdict;
+  u32 parent_of_mutation_tree;
+  u32 nearest_parent_with_symdict;
 };
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
@@ -1066,6 +1071,12 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
   q->depth        = cur_depth + 1;
   q->passed_det   = passed_det;
   if (is_synced_from_outside) q->favored = 1;
+
+  q->parent_of_mutation_tree = queue_cur->id;
+  if (queue_cur->has_symdict)
+      q->nearest_parent_with_symdict = queue_cur->id;
+  else if (queue_cur->nearest_parent_with_symdict)
+      q->nearest_parent_with_symdict = queue_cur->nearest_parent_with_symdict;
 
   if (q->depth > max_depth) max_depth = q->depth;
 
@@ -2237,6 +2248,7 @@ struct symdict_data* load_symdict(u8* dir, u32 seed_id) {
         FATAL("Symdict '%s' is too big (%s, limit is %s)", fn, DMS(st.st_size), DMS(MAX_DICT_FILE));
 
     struct symdict_data* res = parse_symdict_file(fn);
+
     ck_free(fn);
     return res;
 }
@@ -7153,17 +7165,26 @@ custom_mutator_stage:
 
 symdict_stage:
 
-if (!queue_cur->should_symdict)
+if (!enable_symdict)
     goto havoc_stage;
 
 cur_symdict = load_symdict(symdict_dir, queue_cur->id);
-if (cur_symdict == NULL)
-    goto havoc_stage;
 
+if (cur_symdict != NULL) {
+    queue_cur->has_symdict = 1;
+}
+else if (queue_cur->nearest_parent_with_symdict) {
+    cur_symdict = load_symdict(symdict_dir, queue_cur->nearest_parent_with_symdict);
+}
+
+if (cur_symdict == NULL) {
+    goto havoc_stage;
+}
 /*
 尝试从文件靠后往前的字段替换为字典值，跳过skip_det_eff的部分
 如果没有与effmap重合，那么低概率保留
 后面的字段有一定概率保留，越长的字段保留概率越高
+替换试一下，位反转试一下
 */
 
   stage_name = "symbolic dict";
@@ -7203,14 +7224,40 @@ if (cur_symdict == NULL)
         resized = 1;
     }
 
+    u8* orig_word = ck_alloc(sizeof(u8) * cur_symdict[i].len);
     // apply this dict word
     for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+        orig_word[j - cur_symdict[i].begin] = out_buf[j];
         out_buf[j] = cur_symdict[i].str[j-cur_symdict[i].begin];
     }
 
     // fuzz
     u32 last_queued = queued_discovered;
     if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+
+    //  destablize the word
+    if (cur_symdict[i].len <= 32 && (cur_symdict[i].len %4 == 0 || cur_symdict[i].len % 8 == 0)) {
+        for (int seg = cur_symdict[i].begin; seg <= cur_symdict[i].end; seg += 8) {
+            for (int pos = seg; pos < seg + 8; ++pos) {
+                u8 orig = out_buf[pos];
+                for (j = 1; j <= 8; j++) {
+                u8 r = orig ^ (orig + j);
+                if (!could_be_bitflip(r)) {
+                    stage_cur_val = j;
+                    out_buf[i] = orig + j;
+                    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+                }
+                r =  orig ^ (orig - j);
+                if (!could_be_bitflip(r)) {
+                    stage_cur_val = -j;
+                    out_buf[i] = orig - j;
+                    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+                }
+                out_buf[i] = orig;
+                }
+            }
+        }
+    }
 
     // recover?
     cnt = 0;
@@ -7233,12 +7280,17 @@ if (cur_symdict == NULL)
             len = cur_symdict[i].begin - 1;
         }
         else {
-            replace_with_random(out_buf, cur_symdict[i].begin, cur_symdict[i].end);
+            for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+                out_buf[j] = orig_word[j - cur_symdict[i].begin];
+            }
+            // replace_with_random(out_buf, cur_symdict[i].begin, cur_symdict[i].end);
         }
     }
     else {
         last_applied_dict = 0;
     }
+
+    ck_free(orig_word);
 
     stage_cur++;
 
