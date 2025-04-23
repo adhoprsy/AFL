@@ -327,7 +327,7 @@
    problems with complex programs). You need to recompile the target binary
    after changing this - otherwise, SEGVs may ensue. */
 
-#define MAP_SIZE_POW2       16
+#define MAP_SIZE_POW2       18
 #define MAP_SIZE            (1 << MAP_SIZE_POW2)
 
 /* Maximum allocator request size (keep well under INT_MAX): */
@@ -362,13 +362,13 @@
 // #define IGNORE_FINDS
 
 /* SkipDet's global configuration */
- 
+
  #define MINIMAL_BLOCK_SIZE 64
  #define SMALL_DET_TIME (60 * 1000 * 1000U)
  #define MAXIMUM_INF_EXECS (16 * 1024U)
  #define MAXIMUM_QUICK_EFF_EXECS (64 * 1024U)
  #define THRESHOLD_DEC_TIME (20 * 60 * 1000U)
- 
+
  /* Set the Prob of selecting eff_bytes 3 times more than original,
     Now disabled */
  #define EFF_HAVOC_RATE 3

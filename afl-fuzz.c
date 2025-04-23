@@ -2090,11 +2090,11 @@ void load_edges_file(u8* fname) {
     FILE* file = fopen(fname, "rb");
     if (!file) PFATAL("Unable to open edge file %s", fname);
 
-    u32 line_num;
-    if (fread(&line_num, sizeof(u32), 1, file) != 1) {
-        if (feof(file) || line_num == 0) return; // 文件正常结束
-        PFATAL("Failed to read line_num");
-    }
+    u32 line_num = 0;
+    // if (fread(&line_num, sizeof(u32), 1, file) != 1) {
+        // if (feof(file) || line_num == 0) return; // 文件正常结束
+        // PFATAL("Failed to read line_num");
+    // }
 
     while (!feof(file)) {
         u32 parent_id;
@@ -2120,6 +2120,14 @@ void load_edges_file(u8* fname) {
         if (fread(sons, sizeof(u32), num_son, file) != num_son) {
             ck_free(sons);
             PFATAL("Failed to read children");
+        }
+
+        ++line_num;
+
+        // 暴力去重
+        if(cond_edge_son[parent_id] != NULL) {
+            ck_free(sons);
+            continue;
         }
 
         num_cond_edge_sons[parent_id] = num_son;
@@ -2245,7 +2253,7 @@ struct symdict_data* load_symdict(u8* dir, u32 seed_id) {
         return NULL;
     }
     if (st.st_size > 1024)
-        FATAL("Symdict '%s' is too big (%s, limit is %s)", fn, DMS(st.st_size), DMS(MAX_DICT_FILE));
+        FATAL("Symdict '%ld' is too big (%s, limit is %s)", fn, DMS(st.st_size), DMS(MAX_DICT_FILE));
 
     struct symdict_data* res = parse_symdict_file(fn);
 
