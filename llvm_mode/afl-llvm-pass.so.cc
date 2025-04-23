@@ -185,11 +185,13 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       /* Make up cur_loc */
       Instruction* term = BB.getTerminator();
       if (!term) continue;
+
       #ifdef DEBUG
       errs() << *term << "\n";
       #endif
       if (!term->hasMetadata(M.getMDKindID("basicblock.id"))) continue;
-      uint64_t cur_loc =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
+      uint32_t cur_loc =read_id_from_metadata(term->getMetadata(M.getMDKindID("basicblock.id")));
+
       #ifdef DEBUG
       errs() <<*term <<  " | cur_loc : " << cur_loc << "\n";
       #endif
@@ -215,6 +217,7 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
 #endif
         AFLMapPtr);
       MapPtr->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
+
       Value *MapPtrIdx =
           IRB.CreateGEP(
 #if LLVM_VERSION_MAJOR >= 14
