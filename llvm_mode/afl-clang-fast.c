@@ -172,8 +172,8 @@ static void edit_params(u32 argc, char** argv) {
 
     cc_params[cc_par_cnt++] = "-fstack-protector-all";
 
-    if (!fortify_set)
-      cc_params[cc_par_cnt++] = "-D_FORTIFY_SOURCE=2";
+    // if (!fortify_set)
+      // cc_params[cc_par_cnt++] = "-D_FORTIFY_SOURCE=2";
 
   }
 
@@ -214,9 +214,9 @@ static void edit_params(u32 argc, char** argv) {
 
   if (!getenv("AFL_DONT_OPTIMIZE")) {
 
-    cc_params[cc_par_cnt++] = "-g";
-    cc_params[cc_par_cnt++] = "-O3";
-    cc_params[cc_par_cnt++] = "-funroll-loops";
+    // cc_params[cc_par_cnt++] = "-g";
+    // cc_params[cc_par_cnt++] = "-O3";
+    // cc_params[cc_par_cnt++] = "-funroll-loops";
 
   }
 
@@ -355,7 +355,11 @@ int main(int argc, char** argv) {
 #endif
 
   edit_params(argc, argv);
-
+#ifdef DEBUG
+  for (int i=0;i<cc_par_cnt;++i) {
+      printf( "%s\n", cc_params[i]);
+  }
+#endif
   execvp(cc_params[0], (char**)cc_params);
 
   FATAL("Oops, failed to execute '%s' - check your PATH", cc_params[0]);
