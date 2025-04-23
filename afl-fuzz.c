@@ -28,6 +28,8 @@
 
 */
 
+#define SYMDICT_DEBUG
+
 #define AFL_MAIN
 #include "android-ashmem.h"
 #define MESSAGES_TO_STDOUT
@@ -966,17 +968,23 @@ static struct queue_entry* get_least_sched_seed(u32 parent) {
     return res;
 }
 
-void update_frontier_bb_top_rated( struct queue_entry* q, u32 increased_hit_count) {
-    u32 parent = global_max_weight_frontier;
+void update_frontier_bb_top_rated( struct queue_entry* q, u32 increased_hit_count, u32 parent) {
     struct queue_entry* top_q = frontier_bb_top_rated[parent];
     if (top_q == NULL) {
         frontier_bb_top_rated[parent] = q;
-        top_q = q;
+        #ifdef SYMDICT_DEBUG
+        ACTF("top q of edge %d -> %d set to %d", q->id);
+        #endif
     }
     else {
         q->max_inc_hit_cnt = increased_hit_count * q->exec_us;
-        if (q->max_inc_hit_cnt > top_q->max_inc_hit_cnt)
+        if (q->max_inc_hit_cnt > top_q->max_inc_hit_cnt) {
             frontier_bb_top_rated[parent] = q;
+
+            #ifdef SYMDICT_DEBUG
+            ACTF("top q of edge %d -> %d update to %d", q->id);
+            #endif
+        }
     }
 }
 
@@ -992,6 +1000,10 @@ void update_frontier_bb_weight(u32 parent) {
     if (rate > global_max_weight) {
         global_max_weight = rate;
         global_max_weight_frontier = parent;
+
+        #ifdef SYMDICT_DEBUG
+        ACTF("global max weight frontier update: %d", parent);
+        #endif
     }
 
 }
@@ -1024,6 +1036,10 @@ void update_frontier_bb_seed(struct queue_entry* q) {
                 clean_frontier_bb_seed(edge_hash);
                 continue;
             }
+
+            #ifdef SYMDICT_DEBUG
+            ACTF("putting seed %d into list of edge %d -> %d", q->id, parent_id, son_id);
+            #endif
             seed_list_push_back(edge_hash, q);
         }
 
@@ -3554,7 +3570,7 @@ static u8* describe_op(u8 hnb) {
 
   } else {
 
-    sprintf(ret, "src:%06u", current_entry);
+    sprintf(ret, "src:%06u", queue_cur->id);
 
     if (splicing_with >= 0)
       sprintf(ret + strlen(ret), "+%06u", splicing_with);
@@ -3956,7 +3972,7 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              start_time / 1000, get_cur_time() / 1000, getpid(),
              queue_cycle ? (queue_cycle - 1) : 0, total_execs, eps,
              queued_paths, queued_favored, queued_discovered, queued_imported,
-             max_depth, current_entry, pending_favored, pending_not_fuzzed,
+             max_depth, queue_cur->id, pending_favored, pending_not_fuzzed,
              queued_variable, stability, bitmap_cvg, unique_crashes,
              unique_hangs, last_path_time / 1000, last_crash_time / 1000,
              last_hang_time / 1000, total_execs - last_crash_execs,
@@ -4017,7 +4033,7 @@ void plot_profile_data(struct queue_entry* q) {
                "and spend %lld/%lld(%02.2f), cover %02.2f yet, %d/%d undet bits, "
                "continue %d.\n",
                current_ms / 1000 / 3600, (current_ms / 1000 / 60) % 60,
-               (current_ms / 1000) % 60, current_entry,
+               (current_ms / 1000) % 60, queue_cur->id,
                havoc_prof->edge_det_stage, havoc_prof->edge_havoc_stage,
                current_edges, det_finding_rate,
                havoc_prof->det_stage_time / 1000,
@@ -4036,14 +4052,14 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
   static u64 prev_qc, prev_uc, prev_uh;
 
   if (prev_qp == queued_paths && prev_pf == pending_favored &&
-      prev_pnf == pending_not_fuzzed && prev_ce == current_entry &&
+      prev_pnf == pending_not_fuzzed && prev_ce == queue_cur->id &&
       prev_qc == queue_cycle && prev_uc == unique_crashes &&
       prev_uh == unique_hangs && prev_md == max_depth) return;
 
   prev_qp  = queued_paths;
   prev_pf  = pending_favored;
   prev_pnf = pending_not_fuzzed;
-  prev_ce  = current_entry;
+  prev_ce  = queue_cur->id;
   prev_qc  = queue_cycle;
   prev_uc  = unique_crashes;
   prev_uh  = unique_hangs;
@@ -4057,7 +4073,7 @@ static void maybe_update_plot_file(double bitmap_cvg, double eps) {
 
   fprintf(plot_file,
           "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %u\n",
-          get_cur_time() / 1000, queue_cycle - 1, current_entry, queued_paths,
+          get_cur_time() / 1000, queue_cycle - 1, queue_cur->id, queued_paths,
           pending_not_fuzzed, pending_favored, bitmap_cvg, unique_crashes,
           unique_hangs, max_depth, eps, current_edges); /* ignore errors */
 
@@ -4669,9 +4685,9 @@ static void show_stats(void) {
      together, but then cram them into a fixed-width field - so we need to
      put them in a temporary buffer first. */
 
-  sprintf(tmp, "%s%s (%0.02f%%)", DI(current_entry),
+  sprintf(tmp, "%s%s (%0.02f%%)", DI(queue_cur->id),
           queue_cur->favored ? "" : "*",
-          ((double)current_entry * 100) / queued_paths);
+          ((double)queue_cur->id * 100) / queued_paths);
 
   SAYF(bV bSTOP "  now processing : " cRST "%-17s " bSTG bV bSTOP, tmp);
 
@@ -5634,6 +5650,9 @@ u8 skip_deterministic_stage( u8 *orig_buf, u8 *out_buf,
 
   if (!should_det_fuzz(queue_cur)) return 1;
 
+  #ifdef SYMDICT_DEBUG
+  ACTF("seed %d is running skip deterministic stage\n", queue_cur->id);
+  #endif
   /* Add check to make sure that for seeds without too much undet bits,
      we ignore them */
 
@@ -5931,6 +5950,8 @@ cleanup_skipdet:
    function is a tad too long... returns 0 if fuzzed successfully, 1 if
    skipped or bailed out. */
 
+struct queue_entry* switched_out_queue_entry = NULL;
+
 static u8 fuzz_one(char** argv) {
 
   s32 len, fd, temp_len, i, j;
@@ -5946,10 +5967,22 @@ static u8 fuzz_one(char** argv) {
   u32 PROB = 60;
   if ((queue_cur->was_fuzzed || !queue_cur->favored)) PROB = 90;
   else if (queue_cycle > 1 && !queue_cur->was_fuzzed) PROB = 75;
+
   u8 use_top_rated = UR(100) < PROB;
+
+
+  u32 parent_of_top_rated = 0;
   if (global_max_weight_frontier != UINT32_MAX) {
-      queue_cur = use_top_rated ? frontier_bb_top_rated[global_max_weight_frontier] : queue_cur;
+      if (use_top_rated) {
+          switched_out_queue_entry = queue_cur;
+          pick_new_scheduled_seed();
+          parent_of_top_rated = global_max_weight_frontier;
+          #ifdef SYMDICT_DEBUG
+            ACTF("using top rated, seed %d", queue_cur->id);
+          #endif
+      }
   }
+  queue_cur->sched_times++;
 // #ifdef IGNORE_FINDS
 
 //   /* In IGNORE_FINDS mode, skip any entries that weren't in the
@@ -5990,7 +6023,7 @@ static u8 fuzz_one(char** argv) {
 
   if (not_on_tty) {
     ACTF("Fuzzing test case #%u (%u total, %llu uniq crashes found)...",
-         current_entry, queued_paths, unique_crashes);
+         queue_cur->id, queued_paths, unique_crashes);
     fflush(stdout);
   }
 
@@ -7808,7 +7841,7 @@ retry_splicing:
 
     /* Pick a random queue entry and seek to it. Don't splice with yourself. */
 
-    do { tid = UR(queued_paths); } while (tid == current_entry);
+    do { tid = UR(queued_paths); } while (tid == queue_cur->id);
 
     splicing_with = tid;
     target = queue;
@@ -7891,7 +7924,7 @@ abandon_entry:
   /* Update pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
   if (use_top_rated)
-      update_frontier_bb_top_rated(queue_cur, new_hit_cnt - orig_hit_cnt);
+      update_frontier_bb_top_rated(queue_cur, new_hit_cnt - orig_hit_cnt, parent_of_top_rated);
 
   if (!stop_soon && !queue_cur->cal_failed && !queue_cur->was_fuzzed) {
     queue_cur->was_fuzzed = 1;
@@ -8470,6 +8503,9 @@ EXP_ST void setup_dirs_fds(void) {
   if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
   ck_free(tmp);
 
+  tmp = alloc_printf("%s/symdict", out_dir);
+  if (mkdir(tmp, 0700)) PFATAL("Unable to create '%s'", tmp);
+  ck_free(tmp);
   /* Generally useful file descriptors. */
 
   dev_null_fd = open("/dev/null", O_RDWR);
@@ -8494,11 +8530,9 @@ EXP_ST void setup_dirs_fds(void) {
                      /* ignore errors */
 
   tmp = alloc_printf("%s/plot_det_data", out_dir);
-
   fd = open(tmp, O_WRONLY | O_CREAT, 0600);
   if (fd < 0) { PFATAL("Unable to create '%s'", tmp); }
     ck_free(tmp);
-
   det_plot_file = fdopen(fd, "w");
   if (!det_plot_file) { PFATAL("fdopen() failed"); }
 
@@ -9107,7 +9141,7 @@ int main(int argc, char** argv) {
 
       case 'X': {/* symbolic dictionary */
         if (symdict_dir) FATAL("Multiple -X options (sym extracted dictionary) not supported");
-        symdict_dir = optarg;
+        enable_symdict = 1;
         break;
       }
 
@@ -9364,11 +9398,6 @@ int main(int argc, char** argv) {
       cur_skipped_paths = 0;
       queue_cur         = queue;
 
-      if (seek_to == 0) {
-        // pick new seed
-        pick_new_scheduled_seed();
-
-      }
       while (seek_to) {
         current_entry++;
         seek_to--;
@@ -9398,8 +9427,6 @@ int main(int argc, char** argv) {
 
     }
 
-    queue_cur->sched_times++;
-
     skipped_fuzz = fuzz_one(use_argv);
 
     if (!stop_soon && sync_id && !skipped_fuzz) {
@@ -9413,8 +9440,13 @@ int main(int argc, char** argv) {
 
     if (stop_soon) break;
 
-    queue_cur = queue_cur->next;
-    current_entry++;
+    if (switched_out_queue_entry) {
+        queue_cur = switched_out_queue_entry;
+    }
+    else {
+        queue_cur = queue_cur->next;
+        current_entry++;
+    }
 
   }
 
@@ -9451,8 +9483,11 @@ stop_fuzzing:
   }
 
   fclose(plot_file);
+  fclose(det_plot_file);
   destroy_queue();
   free_queue_vec(&seed_queue_vec);
+
+  ck_free(skipdet_g->virgin_det_bits);
 
   for (int i=0;i<MAP_SIZE;++i) {
       if (cond_edge_son[i] != NULL)

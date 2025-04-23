@@ -252,11 +252,11 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
         }
 
         uint32_t parent_id =read_id_from_metadata(terminator->getMetadata(M.getMDKindID("basicblock.id")));
-
-        // errs() << "-----------------------------------------------\n";
-        // errs() << BB << "\n";
-        // errs() << "bb_id: " <<BB.getName() << " | unique_id: " <<parent_id << " | " <<*terminator << "\n";
-
+#ifdef DEBUG
+        errs() << "-----------------------------------------------\n";
+        errs() << BB << "\n";
+        errs() << "bb_id: " <<BB.getName() << " | unique_id: " <<parent_id << " | " <<*terminator << "\n";
+#endif
         // assign id for its child
         for (BasicBlock* succ: successors(&BB)) {
           Instruction* term = succ->getTerminator();
@@ -301,6 +301,11 @@ PreservedAnalyses UniqueID::run(Module &M, ModuleAnalysisManager &AM) {
           inst_blocks++;
         }
         uint64_t parent_id =read_id_from_metadata(terminator->getMetadata(M.getMDKindID("basicblock.id")));
+#ifdef DEBUG
+        errs() << "-----------------------------------------------\n";
+        errs() << BB << "\n";
+        errs() << "bb_id: " <<BB.getName() << " | unique_id: " <<parent_id << " | " <<*terminator << "\n";
+#endif
         // assign id for its child
         for (BasicBlock* succ: successors(&BB)) {
           Instruction* term = succ->getTerminator();
