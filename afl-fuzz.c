@@ -59,6 +59,7 @@
 #include <termios.h>
 #include <dlfcn.h>
 #include <sched.h>
+#include <stdint.h>
 
 #include <sys/wait.h>
 #include <sys/time.h>
@@ -107,6 +108,9 @@ EXP_ST u8 *in_dir,                    /* Input directory with test cases  */
           *target_path,               /* Path to target binary            */
           *orig_cmdline;              /* Original command line            */
 
+u8  *symdict_dir = 0; // symblic analysis extracted dictionary
+
+
 char** use_argv;
 
 EXP_ST u32 exec_tmout = EXEC_TIMEOUT; /* Configurable exec timeout (ms)   */
@@ -146,6 +150,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            fast_cal,                  /* Try to calibrate faster?         */
            skipdet_optimization,
            enable_symdict = 1,
+           enable_top_rated,
            is_synced_from_outside,
            fuzzing_started;
 
@@ -304,7 +309,7 @@ struct queue_entry {
 
   u32 sched_times;
   u32 det_times;
-  u64 max_inc_hit_cnt;
+  u32 max_inc_hit_cnt, total_inc_hit_cnt;
 
   u8  cal_failed,                     /* Calibration failed?              */
       trim_done,                      /* Trimmed?                         */
@@ -429,17 +434,16 @@ u32 total_conditional_edge;
 u32 hash_to_edge_id[MAP_SIZE];
 u32 edge_id_to_hash[MAP_SIZE];
 u32 cond_edge_parent[MAP_SIZE]; // edge id -> parent
-u8 num_cond_edge_sons[MAP_SIZE];
+u8 num_sons[MAP_SIZE];
 u32* cond_edge_son[MAP_SIZE];   // parent id -> sons
 
 u32 frontier_bb_sched_times[MAP_SIZE];
-u64 frontier_bb_exec_time[MAP_SIZE]; // total exec time of seeds that reaches this parent block
 u64 useful_exec_time[MAP_SIZE]; // sum of exec time that useful to this parent bb
 
 u8 is_fully_covered[MAP_SIZE];
+u64 update_top_rate_failed_cnt[MAP_SIZE];
 
 double frontier_edge_weight[MAP_SIZE];
-double max_weight[MAP_SIZE]; // weight of this frontier bb
 double global_max_weight = -DBL_MAX;
 u32 global_max_weight_frontier = UINT32_MAX;    // global best frontier
 
@@ -994,42 +998,30 @@ void update_frontier_bb_top_rated( struct queue_entry* q, u32 increased_hit_coun
         #endif
     }
     else {
-        q->max_inc_hit_cnt = increased_hit_count * q->exec_us;
-        if (q->max_inc_hit_cnt > top_q->max_inc_hit_cnt) {
-            frontier_bb_top_rated[parent] = q;
+        q->max_inc_hit_cnt = q->max_inc_hit_cnt < increased_hit_count ? increased_hit_count:q->max_inc_hit_cnt;
+        q->total_inc_hit_cnt += increased_hit_count;
 
+        double rate = log1p(increased_hit_count) + log1p(update_top_rate_failed_cnt[parent]);
+        double top_q_rate = log1p(top_q->total_inc_hit_cnt) - log(top_q->sched_times);
+        if (rate > top_q_rate) {
+            frontier_bb_top_rated[parent] = q;
+            top_q = q;
             #ifdef SYMDICT_DEBUG
-            OKF("top q of block %u update to %u",parent, q->id);
+                OKF("top q of block %u update to %u",parent, q->id);
             #endif
         }
+        else {
+            update_top_rate_failed_cnt[parent]++;
+        }
     }
-}
 
-void update_frontier_bb_weight(u32 parent) {
-    struct queue_entry* top_q = frontier_bb_top_rated[parent];
-    if (top_q == NULL) {
-        top_q = get_least_sched_seed(parent);
-        if (top_q == NULL) return;
-    }
-    double rate = -log(frontier_bb_exec_time[parent]) - log1p(top_q->sched_times);
-    rate += log(top_q->exec_us) + log1p(top_q->det_times);
-
-    if (rate > max_weight[parent]) {
-        max_weight[parent] = rate;
-    }
-    if (rate > global_max_weight) {
-        global_max_weight = rate;
-        global_max_weight_frontier = parent;
-
-        #ifdef SYMDICT_DEBUG
-        OKF("global max weight frontier update: %u, rate: %.8lf", parent, rate);
-        #endif
-    }
 
 }
 
-void update_frontier_bb_seed(struct queue_entry* q) {
-    u32 map_size_batched = (MAP_SIZE + 7) >> 3;
+void update_global_weight() {
+    if (queue_cur == NULL) return;
+
+    u32 map_size_batched = MAP_SIZE >> 3;
     u64* trace_bits_batched = (u64*) trace_bits;
     // Check a sparse array faster by batching eight u8 ptrs as one u64 ptr.
     for (u32 i = 0; i < map_size_batched; i++) {
@@ -1041,59 +1033,103 @@ void update_frontier_bb_seed(struct queue_entry* q) {
       for (u32 j = 0; j < 8; j++){
         if (!cur_trace_bit[j]) continue;
 
-        u32 parent_id = i * 8 + j;
+        u32 edge_hash = i * 8 + j;
+        u32 edge_id = hash_to_edge_id[edge_hash];
+        if (!edge_id) continue;
+
+        u32 parent = cond_edge_parent[edge_id];
+
+        if (is_fully_covered[parent]) continue;
+
+        struct queue_entry* top_q = frontier_bb_top_rated[parent];
+        if(top_q == NULL) {
+            top_q = get_least_sched_seed(parent);
+        }
+        if(top_q == NULL) {
+            top_q = frontier_bb_top_rated[parent] = queue_cur;
+        }
+
+        // double rate = -log(frontier_bb_exec_time[parent]) - log1p(top_q->sched_times);
+        // rate += log(top_q->exec_us) + log1p(top_q->et_times);
+        double rate = log1p(top_q->total_inc_hit_cnt)
+                    + log1p(top_q->det_times) - log1p(top_q->sched_times);
+
+        if (rate > global_max_weight) {
+            global_max_weight = rate;
+            global_max_weight_frontier = parent;
+
+            #ifdef SYMDICT_DEBUG
+            OKF("global max weight frontier update: %u, rate: %.8lf", parent, rate);
+            #endif
+        }
+
+      }
+    }
+}
+
+// 将种子保存到路径上边的起始块的list上
+void update_frontier_bb_seed(struct queue_entry* q) {
+    u32 map_size_batched = MAP_SIZE >> 3;
+    u64* trace_bits_batched = (u64*) trace_bits;
+    // Check a sparse array faster by batching eight u8 ptrs as one u64 ptr.
+    for (u32 i = 0; i < map_size_batched; i++) {
+      if (likely(!trace_bits_batched[i]))
+        continue;
+
+      u8 *cur_trace_bit = (u8 *)(trace_bits_batched + i);
+
+      for (u32 j = 0; j < 8; j++){
+        if (!cur_trace_bit[j]) continue;
+
+        u32 edge_hash = i * 8 + j;
+        u32 edge_id = hash_to_edge_id[edge_hash];
+        if (!edge_id) continue;
+
+        u32 parent_id = cond_edge_parent[edge_id];
 
         if (is_fully_covered[parent_id]) continue;
 
-        u32 num_of_sons = num_cond_edge_sons[parent_id];
-
-        frontier_bb_exec_time[parent_id] += q->exec_us;
+        u32 num_of_sons = num_sons[parent_id];
 
         if (num_of_sons < 2) continue;
 
         u8 cnt_coved_sons = 0;
-        for (int i=0; i < num_of_sons; ++i) {
-            u32 son_id = cond_edge_son[parent_id][i];
+        for (int t=0; t < num_of_sons; ++t) {
+            u32 son_id = cond_edge_son[parent_id][t];
             u32 edge_hash = (parent_id >> 1) ^ son_id;
             if (is_reached(edge_hash, virgin_bits)) {
                 cnt_coved_sons++;
             }
         }
         if (cnt_coved_sons == num_of_sons) {
-            ACTF("this block is fully covered: %u", parent_id);
+            // #ifdef SYMDICT_DEBUG
+                // ACTF("this block is fully covered: %u", parent_id);
+                // SAYF("trying to free its frontier_bb_seed list");
+            // #endif
             is_fully_covered[parent_id] = 1;
-            SAYF("trying to free its frontier_bb_seed list");
             clean_frontier_bb_seed(parent_id);
-            if (global_max_weight_frontier == parent_id) {
-                SAYF("trying to use after a freeeed parentid");
-            }
             continue;
         }
         #ifdef SYMDICT_DEBUG
             // ACTF("putting seed %u into list of parent block %u", q->id, parent_id);
         #endif
         seed_list_push_back(parent_id, q);
-        update_frontier_bb_weight(parent_id);
       }
     }
 }
 
 u8 pick_new_scheduled_seed() {
 
-    if (!global_max_weight_frontier) return 0;
-
-    if (UR(100) < 70) return 0;
+    if (global_max_weight_frontier == UINT32_MAX) return 0;
 
     if (last_path_time > 10 * 60 * 1000) return 0;
-
 
     ACTF("picking next schedule seed");
 
     u32 tmp;
     struct queue_entry* tmpp;
-    if (frontier_bb_top_rated[global_max_weight_frontier] == NULL) {
+    if (frontier_bb_top_rated[global_max_weight_frontier] == NULL)
         tmpp = get_least_sched_seed(global_max_weight_frontier);
-    }
     else
         tmpp = frontier_bb_top_rated[global_max_weight_frontier];
 
@@ -1159,7 +1195,7 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
 
   last_path_time = get_cur_time();
 
-  if (fuzzing_started)
+  if (enable_top_rated && fuzzing_started && queue_cur != NULL)
       update_frontier_bb_seed(q);
 
   if (skipdet_optimization) {
@@ -2189,7 +2225,7 @@ void load_edges_file(u8* fname) {
             continue;
         }
 
-        num_cond_edge_sons[parent_id] = num_son;
+        num_sons[parent_id] = num_son;
         cond_edge_son[parent_id] = sons;
 
         for (int i=0;i<num_son;++i) {
@@ -2237,6 +2273,8 @@ void* cleanup_symdict(struct symdict_data* entries, u32 count) {
         if (entries[i].str)
             ck_free(entries[i].str);
     }
+    ck_free(entries);
+    cur_symdict_len = 0;
     return NULL;
 }
 
@@ -2290,20 +2328,24 @@ struct symdict_data* parse_symdict_file(u8* fn) {
 
         // 添加null终止符
         entries[i].str[entries[i].len] = '\0';
+        OKF("symdict line %u, begin %d, end %d, len %d, str %s",
+            i, entries[i].begin, entries[i].end, entries[i].len, entries[i].str
+        );
     }
 
     fclose(file);
     return entries;
 }
 
-struct symdict_data* load_symdict(u8* dir, u32 seed_id) {
-    ACTF("Finding symdict for '%d' ...", seed_id);
+struct symdict_data* load_symdict(u32 seed_id) {
     char fname[ID_LENGTH + 1];
     idtostr(seed_id, fname);
 
-    u8* fn = alloc_printf("%s/%s", dir, fname);
+
+    u8* fn = alloc_printf("%s/%s", symdict_dir, fname);
     struct stat st;
 
+    ACTF("Finding symdict for '%d' ... %s / %s", seed_id,symdict_dir, fname);
     if (lstat(fn, &st) || access(fn, R_OK)) {
         SAYF("Unable to access '%s'", fn);
         return NULL;
@@ -5661,11 +5703,13 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
   }
 
-  OKF("num of new det bits of seed %u is %u", q->id, new_det_bits);
+  OKF("num of new det bits of seed %u is %u, current global thresh is %u",
+      q->id, new_det_bits, skipdet_g->undet_bits_threshold);
 
-  if (!skipdet_g->undet_bits_threshold)
+  if (!skipdet_g->undet_bits_threshold) {
      skipdet_g->undet_bits_threshold = new_det_bits * 0.05 < 2 ? 2 : new_det_bits * 0.05;
-
+     OKF("set undet_bits_threshold to %u", skipdet_g->undet_bits_threshold);
+  }
   if (new_det_bits >=  skipdet_g->undet_bits_threshold) {
 
     skipdet_g->last_cov_undet = get_cur_time();
@@ -5682,6 +5726,7 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
     }
 
+    OKF("[skipdet] seeed %u should det fuzz.", q->id);
     return 1;
 
   }
@@ -6023,10 +6068,8 @@ static u8 fuzz_one(char** argv) {
   else if (queue_cycle > 1 && !queue_cur->was_fuzzed) PROB = 75;
 
   u8 use_top_rated = UR(100) < PROB;
-
-
   u32 parent_of_top_rated = 0;
-  if (global_max_weight_frontier != UINT32_MAX) {
+  if (enable_top_rated && global_max_weight_frontier != UINT32_MAX) {
       if (use_top_rated) {
           switched_out_queue_entry = queue_cur;
           if (pick_new_scheduled_seed()) {
@@ -6037,6 +6080,7 @@ static u8 fuzz_one(char** argv) {
           }
           else {
               switched_out_queue_entry = NULL;
+              use_top_rated = 0;
           }
       }
   }
@@ -7264,7 +7308,8 @@ skip_extras:
 
   if (!queue_cur->passed_det) mark_as_det_done(queue_cur);
 
-queue_cur->det_times++;
+if (new_hit_cnt)
+    queue_cur->det_times++;
 
 custom_mutator_stage:
 
@@ -7273,7 +7318,7 @@ symdict_stage:
 if (!enable_symdict)
     goto havoc_stage;
 
-cur_symdict = load_symdict(symdict_dir, queue_cur->id);
+cur_symdict = load_symdict(queue_cur->id);
 
 #ifdef SYMDICT_DEBUG
   ACTF("seed %d entering symdict stage\n", queue_cur->id);
@@ -7283,7 +7328,7 @@ if (cur_symdict != NULL) {
     queue_cur->has_symdict = 1;
 }
 else if (queue_cur->nearest_parent_with_symdict) {
-    cur_symdict = load_symdict(symdict_dir, queue_cur->nearest_parent_with_symdict);
+    cur_symdict = load_symdict(queue_cur->nearest_parent_with_symdict);
 }
 
 if (cur_symdict == NULL) {
@@ -7309,30 +7354,34 @@ if (cur_symdict == NULL) {
 
   u8 keep_this_dict = 1, last_applied_dict = 1;
   u8 resized = 0;
-  u32 orig_len = len;
   u8 max_len = 0, min_len = 255;
   u8 max_eff = 0, min_eff = 255;
+
+  u32 orig_len = len;
+  u8* orig_buf = ck_alloc(len);
+  memcpy(orig_buf, out_buf, len);
 
   for (int i = cur_symdict_len - 1; i >= 0; --i) {
     stage_cur = i;
     stage_cur_byte = cur_symdict[i].begin;
 
-
-    // if non of the byte in symdict is effective, skip
     u32 cnt = 0;
-    for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
-        if (j > orig_len) break;
-        if (skip_eff_map[j]) cnt++;
+    if (skip_eff_map != NULL) {
+        // if non of the byte in symdict is effective, skip
+        for (u32 j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+            if (j >= orig_len) break;
+            if (skip_eff_map[j]) cnt++;
+        }
+        if (cur_symdict[i].begin < orig_len && cnt == 0) continue;
     }
-    if (cur_symdict[i].begin < orig_len && cnt == 0) continue;
 
     max_len = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
     min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
 
     // resize out_buf
     if (len < cur_symdict[i].end) {
-        out_buf = (u8*)ck_realloc(out_buf, cur_symdict[i].end);
-        len = cur_symdict[i].end;
+        out_buf = (u8*)ck_realloc(out_buf, cur_symdict[i].end + 5);
+        len = cur_symdict[i].end + 5;
         resized = 1;
     }
 
@@ -7372,13 +7421,17 @@ if (cur_symdict == NULL) {
     }
 
     // recover?
-    cnt = 0;
-    for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
-        if (j > orig_len) break;
-        cnt += skip_eff_map[j];
+    if (skip_eff_map != NULL) {
+        cnt = 0;
+        for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
+            if (j >= orig_len) break;
+            cnt += skip_eff_map[j];
+        }
     }
-    max_eff = max_len > cur_symdict[i].len ? max_len : cur_symdict[i].len;
-    min_len = min_len < cur_symdict[i].len ? min_len : cur_symdict[i].len;
+    else cnt = (min_eff + max_eff) / 2;
+
+    max_eff = max_len > cnt ? max_len : cnt;
+    min_eff = min_eff < cnt ? min_len : cnt;
 
     double p = 0.5 * ((double)(cnt - min_eff) / (double)(max_eff - cnt))
                 + 0.5 * ((double)(cur_symdict[i].len - min_len) / (double)(max_len - cur_symdict[i].len));
@@ -7388,8 +7441,8 @@ if (cur_symdict == NULL) {
 
     if (!keep_this_dict) {
         if (unlikely(last_applied_dict) && resized) {
-            out_buf = (u8*)ck_realloc(out_buf, cur_symdict[i].begin - 1);
-            len = cur_symdict[i].begin - 1;
+            out_buf = (u8*)ck_realloc(out_buf, cur_symdict[i].begin);
+            len = cur_symdict[i].begin;
         }
         else {
             for (int j = cur_symdict[i].begin; j <= cur_symdict[i].end; ++j) {
@@ -7408,11 +7461,18 @@ if (cur_symdict == NULL) {
 
   }
 
+  // recover seed
+  if (len != orig_len) {
+      out_buf = memcpy(out_buf, orig_buf, orig_len);
+      len = orig_len;
+  }
+
   new_hit_cnt = queued_paths + unique_crashes;
 
   stage_finds[STAGE_SYMDICT]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_SYMDICT] += stage_max;
 
+  ck_free(orig_buf);
   cleanup_symdict(cur_symdict, cur_symdict_len);
 
   #ifdef SYMDICT_DEBUG
@@ -7996,8 +8056,12 @@ abandon_entry:
   new_hit_cnt = queued_paths + unique_crashes;
   /* Update pending_not_fuzzed count if we made it through the calibration
      cycle and have not seen this entry before. */
-  if (use_top_rated)
+  if (enable_top_rated) {
+    if(use_top_rated)
       update_frontier_bb_top_rated(queue_cur, new_hit_cnt - orig_hit_cnt, parent_of_top_rated);
+
+    update_global_weight();
+  }
 
   if (!stop_soon && !queue_cur->cal_failed && !queue_cur->was_fuzzed) {
     queue_cur->was_fuzzed = 1;
@@ -9132,8 +9196,7 @@ int main(int argc, char** argv) {
   u64 prev_queued = 0;
   u32 sync_interval_cnt = 0, seek_to;
   u8  *extras_dir = 0;
-  // symblic analysis extracted dictionary
-  u8  *symdict_dir = 0;
+
   u8  mem_limit_given = 0;
   u8  exit_1 = !!getenv("AFL_BENCH_JUST_ONE");
 
@@ -9215,6 +9278,9 @@ int main(int argc, char** argv) {
       case 'X': {/* symbolic dictionary */
         if (symdict_dir) FATAL("Multiple -X options (sym extracted dictionary) not supported");
         enable_symdict = 1;
+        symdict_dir = optarg;
+        OKF("get symdict dir: %s",optarg);
+
         break;
       }
 
@@ -9462,8 +9528,6 @@ int main(int argc, char** argv) {
 
   while (1) {
 
-    fuzzing_started = 1;
-
     u8 skipped_fuzz;
 
     cull_queue();
@@ -9503,6 +9567,8 @@ int main(int argc, char** argv) {
         sync_fuzzers(use_argv);
 
     }
+
+    fuzzing_started = 1;
 
     skipped_fuzz = fuzz_one(use_argv);
 

@@ -266,6 +266,8 @@ PreservedAnalyses AFLCoverage::run(Module &M, ModuleAnalysisManager &AM) {
       ByteValue->setMetadata(M.getMDKindID("nosanitize"), MDNode::get(C, None));
 
       Value *BitPos = IRB.CreateAnd(CurLoc, ConstantInt::get(Int32Ty, 0x7));
+      BitPos = IRB.CreateTrunc(BitPos, Int8Ty);  // 将i32转为i8类型
+
       Value *BitMask = IRB.CreateShl(ConstantInt::get(Int8Ty, 1), BitPos);
       Value *NewByteValue = IRB.CreateOr(ByteValue, BitMask);
 
