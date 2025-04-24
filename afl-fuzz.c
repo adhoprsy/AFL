@@ -28,7 +28,7 @@
 
 */
 
-#define SYMDICT_DEBUG
+// #define SYMDICT_DEBUG
 
 #define AFL_MAIN
 #include "android-ashmem.h"
@@ -2293,8 +2293,9 @@ struct symdict_data* parse_symdict_file(u8* fn) {
         return NULL;
     }
 
+    #ifdef SYMDICT_DEBUG
     ACTF("Found '%d' lines of dict in %s", count, fn);
-
+    #endif
     // 分配内存保存所有子结构
     struct symdict_data* entries = ck_alloc(count * sizeof(struct symdict_data));
     cur_symdict_len = count;
@@ -2328,8 +2329,6 @@ struct symdict_data* parse_symdict_file(u8* fn) {
 
         // 添加null终止符
         entries[i].str[entries[i].len] = '\0';
-        OKF("symdict line %u, begin %d, end %d, len %d, str %s",
-            i, entries[i].begin, entries[i].end, entries[i].len, entries[i].str
         );
     }
 
@@ -5703,12 +5702,16 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
   }
 
+  #ifdef SYMDICT_DEBUG
   OKF("num of new det bits of seed %u is %u, current global thresh is %u",
       q->id, new_det_bits, skipdet_g->undet_bits_threshold);
+  #endif
 
   if (!skipdet_g->undet_bits_threshold) {
      skipdet_g->undet_bits_threshold = new_det_bits * 0.05 < 2 ? 2 : new_det_bits * 0.05;
+  #ifdef SYMDICT_DEBUG
      OKF("set undet_bits_threshold to %u", skipdet_g->undet_bits_threshold);
+#endif
   }
   if (new_det_bits >=  skipdet_g->undet_bits_threshold) {
 
@@ -5726,7 +5729,9 @@ u8 should_det_fuzz(struct queue_entry *q) {
 
     }
 
+    #ifdef SYMDICT_DEBUG
     OKF("[skipdet] seeed %u should det fuzz.", q->id);
+    #endif
     return 1;
 
   }
