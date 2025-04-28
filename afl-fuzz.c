@@ -2329,7 +2329,6 @@ struct symdict_data* parse_symdict_file(u8* fn) {
 
         // 添加null终止符
         entries[i].str[entries[i].len] = '\0';
-        );
     }
 
     fclose(file);
