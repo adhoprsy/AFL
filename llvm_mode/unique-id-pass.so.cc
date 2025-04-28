@@ -196,6 +196,7 @@ void write_edge_info(const std::unordered_map<uint32_t, std::unordered_set<uint3
   // uint32_t line_num = mp.size();
   // int _ =::write(fd,reinterpret_cast<const char*>(&line_num), sizeof(uint32_t));
   for (auto& [bb, sons] : mp) {
+    if (bb == 0 || bb >= MAP_SIZE || sons.size() == 0) continue;
     write_edge(fd, bb, sons);
   }
 
